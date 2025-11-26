@@ -1,0 +1,15 @@
+test/
+.vscode/
+hoodini/__pycache__/**
+*.egg-info/
+commit_contig_lengths.py
+hoodini/data/metacerberus/*
+hoodini/data/metacerberus/**
+hoodini/data/assembly_summary.parquet
+hoodini/data/emapper/*
+hoodini/data/emapper/**
+hoodini/data/genomad_db/*
+hoodini/data/genomad_db/**
+**/__pycache__/
+hoodini/data/contig_lengths/**
+hoodini/data/contig_lengths/

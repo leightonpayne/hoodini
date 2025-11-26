@@ -1,0 +1,1 @@
+## add checks to ensure that the tools are installed and available in the PATH and that the database files are accessible
