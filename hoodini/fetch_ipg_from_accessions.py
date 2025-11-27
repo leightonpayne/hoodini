@@ -64,15 +64,23 @@ def fetch_ipg_from_accessions(accessions: list[str]) -> pd.DataFrame:
             future_to_idx = {executor.submit(wrapped_efetch, chunk, idx): idx for idx, chunk in enumerate(chunks)}
             for future in as_completed(future_to_idx):
                 idx, chunk_result = future.result()
-                results[idx] = chunk_result
+                # Parse immediately to avoid holding massive strings in memory
+                if chunk_result and chunk_result.strip():
+                    try:
+                        chunk_df = pd.read_csv(StringIO(chunk_result), sep="\t")
+                        chunk_df.columns = [col.lower() for col in chunk_df.columns]
+                        results[idx] = chunk_df
+                    except Exception:
+                        results[idx] = None
+                else:
+                    results[idx] = None
                 progress.update(task, advance=1)
 
-    all_text = "\n".join([r for r in results if r])
-    if not all_text.strip():
+    dfs = [df for df in results if df is not None and not df.empty]
+    if not dfs:
         return pd.DataFrame()
-    df = pd.read_csv(StringIO(all_text), sep="\t")
-    df.columns = [col.lower() for col in df.columns]
-    return df
+    
+    return pd.concat(dfs, ignore_index=True)
 
 
 def main():

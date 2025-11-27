@@ -214,89 +214,111 @@ def _fetch_nucleotide_data(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     base = files("hoodini").joinpath("data")
+    contig_path = base / "contig_lengths"
+    summary_path = base / "assembly_summary.parquet"
 
-    # contig_lengths: semi-join against both accession columns, union, unique
-    contigs = pd.DataFrame()
+    # 1. Build a small mapping table in Polars
+    #    (nucleotide_id -> sequence_length, assembly_id, taxid, group, etc.)
     try:
-        contig_path = base / "contig_lengths"
-        ids_nuc = pl.LazyFrame({"acc": nucs})
+        # Filter out empty strings just in case
+        nucs = [n for n in nucs if n and str(n).strip()]
+
+        # Lazy scan of contig_lengths
         cols_keep = [
             "assemblyAccession", "genbankAccession", "refseqAccession",
             "length", "assemblyUnit", "role",
         ]
-
         contigs_scan = pl.scan_parquet(contig_path, allow_missing_columns=True).select(cols_keep)
 
-        gb = contigs_scan.join(ids_nuc, left_on="genbankAccession", right_on="acc", how="semi")
-        rs = contigs_scan.join(ids_nuc, left_on="refseqAccession", right_on="acc", how="semi")
-
-        contigs_tbl = safe_collect(pl.concat([gb, rs]).unique())
-        contigs = contigs_tbl.to_pandas()
-    except Exception as e:
-        console.print(f"[WARN] Failed contig_lengths join: {e}")
-
-    # assembly_summary via semi-join with discovered assemblies (or fall back to df)
-    try:
-        asms = contigs.get("assemblyAccession", pd.Series(dtype=str)).dropna().unique().tolist()
-        if not asms:
-            asms = df["assembly_id"].dropna().unique().tolist()
-
-        summary_path = base / "assembly_summary.parquet"
-        ids_asm = pl.LazyFrame({"assembly_accession": asms})
-        summary_tbl = safe_collect(
-            pl.scan_parquet(summary_path)
-              .join(ids_asm, on="assembly_accession", how="inner")
-              .select([
-                  "assembly_accession", "taxid", "species_taxid", "organism_name",
-                  "infraspecific_name", "assembly_level", "group"
-              ])
+        # Use filter with is_in which pushes down better to Parquet readers than joins
+        # and avoids scanning the whole file if row groups can be skipped.
+        contigs_lf = contigs_scan.filter(
+            pl.col("genbankAccession").is_in(nucs) | 
+            pl.col("refseqAccession").is_in(nucs)
         )
-        summary = summary_tbl.to_pandas()
+
+        # Lazy scan of assembly_summary
+        summary_scan = pl.scan_parquet(summary_path).select([
+            "assembly_accession", "taxid", "species_taxid", "organism_name",
+            "infraspecific_name", "assembly_level", "group"
+        ])
+
+        # Join contigs + summary entirely in Polars
+        # contigs.assemblyAccession <-> summary.assembly_accession
+        joined_lf = contigs_lf.join(
+            summary_scan, 
+            left_on="assemblyAccession", 
+            right_on="assembly_accession", 
+            how="left"
+        )
+
+        # Select & rename only what we need for the final mapping
+        final_cols = [
+            pl.col("assemblyAccession").alias("assembly_id"),
+            pl.col("length").alias("sequence_length"),
+            pl.col("taxid"),
+            pl.col("group"),
+            pl.col("species_taxid"),
+            pl.col("organism_name"),
+            pl.col("infraspecific_name"),
+            pl.col("assembly_level"),
+            pl.col("genbankAccession"),
+            pl.col("refseqAccession")
+        ]
+
+        # Collect the joined result (streaming). 
+        joined_df = safe_collect(joined_lf.select(final_cols))
+
+        # Convert to pandas
+        mapping_df = joined_df.to_pandas()
+
     except Exception as e:
-        console.print(f"[WARN] Failed assembly_summary join: {e}")
-        summary = pd.DataFrame()
+        console.print(f"[WARN] Failed Polars fetch in _fetch_nucleotide_data: {e}")
+        mapping_df = pd.DataFrame()
 
-    # normalize contig columns
-    _rename_map = {
-        "assemblyAccession": "assembly_id",
-        "length": "sequence_length",
-        "genbankAccession": "sequence_id",
-        "refseqAccession": "refseq_accession",
-    }
-    if not contigs.empty:
-        contigs = contigs.rename(columns={k: v for k, v in _rename_map.items() if k in contigs.columns})
+    # 2. Apply the mapping to the main df
+    if not mapping_df.empty:
+        # Split into GCA/GCF logic
+        # Ensure assembly_id is string
+        mapping_df["assembly_id"] = mapping_df["assembly_id"].astype(str)
+        
+        gca_mask = mapping_df["assembly_id"].str.startswith("GCA_")
+        gcf_mask = mapping_df["assembly_id"].str.startswith("GCF_")
+        
+        # GCA -> key is genbankAccession
+        gb_map = (
+            mapping_df.loc[gca_mask]
+            .rename(columns={"genbankAccession": "nucleotide_id"})
+            .drop(columns=["refseqAccession"], errors="ignore")
+            .drop_duplicates(subset="nucleotide_id", keep="first")
+            .set_index("nucleotide_id")
+        )
+        
+        # GCF -> key is refseqAccession
+        rs_map = (
+            mapping_df.loc[gcf_mask]
+            .rename(columns={"refseqAccession": "nucleotide_id"})
+            .drop(columns=["genbankAccession"], errors="ignore")
+            .drop_duplicates(subset="nucleotide_id", keep="first")
+            .set_index("nucleotide_id")
+        )
 
-    # merge contigs + summary
-    merged = contigs.merge(
-        summary,
-        left_on="assembly_id",
-        right_on="assembly_accession",
-        how="left",
-        suffixes=("", "_asm"),
-    )
+        # Prepare df for update
+        wanted = [
+            "sequence_length", "assembly_id", "taxid", "group", 
+            "species_taxid", "organism_name", "infraspecific_name", "assembly_level"
+        ]
+        for c in wanted:
+            if c not in df.columns:
+                df[c] = pd.NA
+        
+        # We use set_index/update to respect the original logic
+        df = df.set_index("nucleotide_id", drop=False)
+        df.update(gb_map, overwrite=False)
+        df.update(rs_map, overwrite=False)
+        df = df.reset_index(drop=True)
 
-    # build mappers & fill back into df
-    gb_rows = merged[merged["assembly_id"].astype(str).str.startswith("GCA_")]
-    rs_rows = merged[merged["assembly_id"].astype(str).str.startswith("GCF_")]
-    mapper_gb = gb_rows.drop_duplicates(subset="sequence_id", keep="first").set_index("sequence_id")
-    mapper_rs = rs_rows.drop_duplicates(subset="refseq_accession", keep="first").set_index("refseq_accession")
-
-    wanted = [
-        "sequence_id", "refseq_accession", "sequence_length", "assembly_id",
-        "taxid", "group", "assembly_accession", "species_taxid",
-        "organism_name", "infraspecific_name", "assembly_level",
-    ]
-    for c in wanted:
-        if c not in df.columns:
-            df[c] = pd.NA
-
-    df = df.set_index("nucleotide_id", drop=False)
-    df.update(mapper_gb, overwrite=False)
-    df.update(mapper_rs, overwrite=False)
-    df = df.reset_index(drop=True)
-    df = df.drop(columns=["sequence_id", "refseq_accession", "assembly_accession"], errors="ignore")
-
-    # fill missing sequence_length via EDirect
+    # 3. Fill missing sequence_length via EDirect (unchanged logic)
     missing = df["sequence_length"].isna()
     if missing.any():
         to_fetch = df.loc[missing, "nucleotide_id"].dropna().unique().tolist()
@@ -319,19 +341,22 @@ def _fetch_nucleotide_data(df: pd.DataFrame) -> pd.DataFrame:
         # backfill taxid/group for any new assemblies
         new_asms = df["assembly_id"].dropna().unique().tolist()
         if new_asms:
-            ids_asm2 = pl.LazyFrame({"assembly_accession": new_asms})
-            summary2_tbl = safe_collect(
-                pl.scan_parquet(base / "assembly_summary.parquet")
-                  .join(ids_asm2, on="assembly_accession", how="inner")
-                  .select(["assembly_accession", "taxid", "group"])
-            )
-            summary2 = summary2_tbl.to_pandas()
-            taxid_map = dict(zip(summary2["assembly_accession"], summary2["taxid"]))
-            group_map = dict(zip(summary2["assembly_accession"], summary2["group"]))
-            df["taxid"] = df["assembly_id"].map(taxid_map).fillna(df["taxid"])
-            df["group"] = df["assembly_id"].map(group_map).fillna(df["group"])
+            try:
+                ids_asm2 = pl.LazyFrame({"assembly_accession": new_asms})
+                summary2_tbl = safe_collect(
+                    pl.scan_parquet(summary_path)
+                      .join(ids_asm2, on="assembly_accession", how="inner")
+                      .select(["assembly_accession", "taxid", "group"])
+                )
+                summary2 = summary2_tbl.to_pandas()
+                taxid_map = dict(zip(summary2["assembly_accession"], summary2["taxid"]))
+                group_map = dict(zip(summary2["assembly_accession"], summary2["group"]))
+                df["taxid"] = df["assembly_id"].map(taxid_map).fillna(df["taxid"])
+                df["group"] = df["assembly_id"].map(group_map).fillna(df["group"])
+            except Exception as e:
+                console.print(f"[WARN] Failed backfill join: {e}")
 
-    # fill start/end
+    # 4. Fill start/end (unchanged logic)
     cond = (
         (df["input_type"] == "nucleotide")
         & df["nucleotide_id"].notnull()
