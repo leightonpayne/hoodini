@@ -11,9 +11,9 @@ from hoodini.utils.downloader import download_with_aria2c
 
 
 EMAPPER_URL = "http://eggnog6.embl.de/download/emapperdb-5.0.2/mmseqs.tar.gz"
-EGGNOG_OG = "https://hoodini.bio/eggnog_og.parquet"
-EGGNOG_PROTS = "https://hoodini.bio/eggnog_prots.parquet"
-CONTIGS_URL = "https://hoodini.bio/contig_lengths.parquet"
+EGGNOG_OG = "https://storage.hoodini.bio/eggnog_og.parquet"
+EGGNOG_PROTS = "https://storage.hoodini.bio/eggnog_prots.parquet"
+CONTIGS_URL = "https://storage.hoodini.bio/contig_lengths.parquet"
 
 
 def _run_cmd(cmd, cwd: Optional[Path] = None):
