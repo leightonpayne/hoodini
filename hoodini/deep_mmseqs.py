@@ -1,7 +1,7 @@
 import subprocess
 import sys
 import argparse
-import pandas as pd
+import polars as pl
 import os
 import shutil
 
@@ -16,7 +16,7 @@ def run_command(command):
 
 def read_output_to_df(output_file):
     # Function to read the output file into a DataFrame
-    df = pd.read_csv(output_file, sep='\t', header=None)
+    df = pl.read_csv(output_file, separator='\t', header=None)
     return df
 
 

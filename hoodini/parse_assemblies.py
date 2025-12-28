@@ -2,20 +2,26 @@
 
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from importlib.resources import files
-import hoodini  # Ensure hoodini is correctly installed and in PYTHONPATH
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import multiprocessing as _mp
 from multiprocessing import Pool
-import requests
-import requests.adapters
 from pathlib import Path
 
-import pandas as pd
 import polars as pl
+import requests
+import requests.adapters
 
-from hoodini.utils.core import console, extract_neighborhood
-
+from hoodini.models.schemas import GFF, NEIGHBORHOODS, PROTEINS, RECORDS
 from hoodini.prefetch_links import get_prefetched_link_table
+from hoodini.neighborhood_extractor import extract_neighborhood
+from hoodini.utils.core import console
+from hoodini.utils.polars_adapters import to_polars
+
+
+def _extract_neighborhood_star(args):
+    """Helper to allow imap_unordered with tuple args."""
+    return extract_neighborhood(*args)
 
 
 def in_jupyter():
@@ -29,8 +35,48 @@ def in_jupyter():
     except Exception:
         return False
 
+
+def _enrich_proteins_with_metadata(all_prots: pl.DataFrame, records: pl.DataFrame, all_neigh: pl.DataFrame) -> pl.DataFrame:
+    """Enrich all_prots with target_prot (input protein ID) and target_nuc (nucleotide ID).
+    
+    This ensures proteins have metadata linking them to their source protein and nucleotide,
+    which is needed by downstream tools (padloc, defensefinder, cctyper, etc.) and visualization.
+    """
+    if all_prots.is_empty():
+        return all_prots
+    
+    # Add target_prot from records using unique_id
+    if "unique_id" in all_prots.columns and "unique_id" in records.columns:
+        prot_map = records.select(["unique_id", "protein_id"]).drop_nulls().unique()
+        prot_map = prot_map.with_columns(pl.col("unique_id").cast(pl.Utf8))
+        all_prots = all_prots.with_columns(pl.col("unique_id").cast(pl.Utf8))
+        
+        all_prots = all_prots.join(
+            prot_map.rename({"protein_id": "target_prot"}),
+            on="unique_id",
+            how="left"
+        )
+    
+    # Add target_nuc from neighborhoods (seqid is the target_nuc / nucleotide_id)
+    if all_neigh is not None and all_neigh.height > 0:
+        neigh_meta = all_neigh.select(["unique_id", "seqid"]).drop_nulls().unique()
+        
+        if "unique_id" in all_prots.columns and "unique_id" in neigh_meta.columns:
+            neigh_meta = neigh_meta.with_columns(pl.col("unique_id").cast(pl.Utf8))
+            
+            all_prots = all_prots.join(
+                neigh_meta.rename({"seqid": "target_nuc"}),
+                on="unique_id",
+                how="left"
+            )
+    
+    return all_prots
+
+
+
+
 def run_assembly_parser(
-    records_df: pd.DataFrame,
+    records_df: pl.DataFrame,
     *,
     output_dir: str = None,
     assembly_folder: str = None,
@@ -65,18 +111,16 @@ def run_assembly_parser(
       - "all_gff":   DataFrame of extracted GFF sequences (id, sequence)
       - "all_neigh": DataFrame of neighborhood sequences (seqid, sequence, etc.)
     """
-    # Work on a copy to avoid mutating the caller’s DataFrame
-    records = records_df.copy()
+    # Work on a copy and enforce schema
+    records = to_polars(records_df, schema=RECORDS)
 
     # Infer output directory if not provided, using the same logic as initialize_inputs
     if output_dir is None:
         input_path = None
-        if hasattr(records_df, 'input_path'):
-            input_path = records_df.input_path
-        elif 'input_path' in records_df.columns:
-            input_path = records_df['input_path'].iloc[0]
+        if "input_path" in records.columns:
+            input_path = records.select("input_path").to_series()[0]
         if input_path is not None:
-            output_dir = str(Path(input_path).stem)
+            output_dir = str(Path(str(input_path)).stem)
         else:
             raise ValueError("No output directory provided and could not infer from input_path. Please specify output_dir.")
 
@@ -85,43 +129,34 @@ def run_assembly_parser(
     # ───────────────────────────────────────────────────────────────────────────────
     # 1) DOWNLOAD ASSEMBLIES (or use local folder)
     # ───────────────────────────────────────────────────────────────────────────────
-    def _download_assemblies(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
-        # Build list of unique assembly_ids where assembly_id.notnull() and failed.isnull()
-        mask = df["assembly_id"].notnull() & df["failed"].isnull()
-        assembly_list = df.loc[mask, "assembly_id"].dropna().unique().tolist()
+    def _download_assemblies(df: pl.DataFrame) -> tuple[pl.DataFrame, str | None]:
+        mask = df["assembly_id"].is_not_null() & df["failed"].is_null()
+        assembly_list = df.filter(mask)["assembly_id"].drop_nulls().unique().to_list()
 
         if not assembly_list:
             console.print("ℹ️  No assemblies to download.")
             return df, None
 
-        # Write assembly_list.txt
         assembly_list_file = os.path.join(output_dir, "assembly_list.txt")
         with open(assembly_list_file, "w") as f:
             f.write("\n".join(assembly_list))
 
-        #generate links results by calling get_prefetched_link_table with the assembly_list
         links_result = get_prefetched_link_table(assembly_list)
+        links = to_polars(links_result)
 
-        # Keep only genomic GenBank (gbff) rows — other filetypes (faa, fna, gff)
-        # may also be returned by get_prefetched_link_table; saving all kinds
-        # to a single target filename caused FAA (protein FASTA) to appear
-        # at the start of the `genomic.gbff` files. Filter here so we only
-        # download the intended GenBank flat file.
-        if "filetype" in links_result.columns:
-            gbff_links = links_result[links_result["filetype"].str.lower() == "gbff"].copy()
+        if "filetype" in links.columns:
+            gbff_links = links.filter(pl.col("filetype").str.to_lowercase() == "gbff")
         else:
-            gbff_links = links_result
+            gbff_links = links
 
-        #check those in which the assembly_id was not found in links_result
         missing_assemblies = set(assembly_list) - set(gbff_links["assembly_id"].unique())
         if missing_assemblies:
             console.print(f"[yellow]Warning:[/yellow] The following assembly_ids were not found in the download links: {missing_assemblies}")
-                
+
         assembly_folder_path = os.path.join(output_dir, "assembly_folder")
 
-        # 1) Create a single Session and mount adapters (tune pool sizes)
         session = requests.Session()
-        total_files = len(gbff_links)
+        total_files = gbff_links.height
         use_jupyter = in_jupyter()
         if use_jupyter:
             from tqdm.notebook import tqdm
@@ -132,10 +167,10 @@ def run_assembly_parser(
             task = progress.add_task("Downloading assemblies", total=total_files)
             progress.start()
 
-        def download_gbff(row):
+        def download_gbff(row: dict):
             assembly_id = row.get("assembly_id")
             url = row.get("url")
-            target_folder = os.path.join(assembly_folder_path, assembly_id)
+            target_folder = os.path.join(assembly_folder_path, str(assembly_id))
             target_file = os.path.join(target_folder, "genomic.gbff")
 
             if os.path.exists(target_file):
@@ -143,36 +178,27 @@ def run_assembly_parser(
 
             try:
                 os.makedirs(target_folder, exist_ok=True)
-
-                # 2) Use session.get(...) + stream=True
                 with session.get(url, timeout=60, stream=True) as resp:
                     resp.raise_for_status()
-                    # 3) Write in chunks to avoid huge memory spike
                     with open(target_file, "wb") as fout:
-                        for chunk in resp.iter_content(chunk_size=1024 * 32):  # 32 KB chunks
+                        for chunk in resp.iter_content(chunk_size=1024 * 32):
                             if not chunk:
                                 continue
                             fout.write(chunk)
-
                 return f"[OK] {assembly_id}"
-
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 return f"[FAIL] {assembly_id}: {e}"
 
-        # 4) Limit worker count to the user-supplied concurrency and size the
-        #    requests connection pool accordingly to avoid "Connection pool is full"
-        MAX_THREADS = max(1, min(max_concurrent_downloads or 8, 32))
-        adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_THREADS, pool_maxsize=MAX_THREADS)
+        max_threads = max(1, min(max_concurrent_downloads or 8, 32))
+        adapter = requests.adapters.HTTPAdapter(pool_connections=max_threads, pool_maxsize=max_threads)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
 
-        # Convert DataFrame to a lightweight list of dicts for safe iteration from threads
-        link_records = gbff_links.to_dict(orient="records")
-
-        with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        link_records = gbff_links.to_dicts()
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
             futures = [executor.submit(download_gbff, row) for row in link_records]
             for future in as_completed(futures):
-                result = future.result()
+                _ = future.result()
                 if use_jupyter:
                     pbar.update(1)
                 else:
@@ -182,15 +208,16 @@ def run_assembly_parser(
         else:
             progress.stop()
 
-
-        # Now populate gbf_path for each record
         cwd = os.getcwd()
-        def _make_gbf_path(aid):
-            return os.path.join(cwd, assembly_folder_path, aid, "genomic.gbff")
+        gbf_map = {aid: os.path.join(cwd, assembly_folder_path, str(aid), "genomic.gbff") for aid in assembly_list}
+        df = df.with_columns(
+            pl.when(mask)
+            .then(pl.col("assembly_id").replace(gbf_map))
+            .otherwise(pl.col("gbf_path"))
+            .alias("gbf_path")
+        )
 
-        df.loc[mask, "gbf_path"] = df.loc[mask, "assembly_id"].apply(_make_gbf_path)
         console.print(f"✔️  Downloaded or located assemblies (folder: {assembly_folder_path})")
-
         return df, assembly_folder_path
 
     records, actual_assembly_folder = _download_assemblies(records)
@@ -198,176 +225,251 @@ def run_assembly_parser(
     # ───────────────────────────────────────────────────────────────────────────────
     # 2) EXTRACT NEIGHBORHOODS (parallel) → all_gff, all_neigh
     # ───────────────────────────────────────────────────────────────────────────────
-    def _extract_neighborhoods(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        # Add a unique_id column so that each parallel result can mark failures
-        df = df.copy()
-        df["unique_id"] = df.index
+    def write_fasta(df: pl.DataFrame, id_col: str, seq_col: str, path: str) -> None:
+        with open(path, "w") as fh:
+            for row in df.select([id_col, seq_col]).iter_rows(named=True):
+                fh.write(f">{row[id_col]}\n")
+                seq = row[seq_col]
+                for i in range(0, len(seq), 80):
+                    fh.write(seq[i:i+80] + "\n")
 
-        # Ensure start, end, strand exist
+    def _extract_neighborhoods(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame, list]:
+        df = df.with_row_count("unique_id").with_columns(pl.col("unique_id").cast(pl.Utf8))
         for col in ("start", "end", "strand"):
             if col not in df.columns:
-                df[col] = None
+                df = df.with_columns(pl.lit(None).alias(col))
 
-        # Build list of arguments for extract_neighborhood
         file_list = []
-        
-        for idx, row in df.iterrows():
+        for row in df.iter_rows(named=True):
+            print(row)
             has_gbf = bool(row.get("gbf_path"))
             has_gff_and_faa = bool(row.get("gff_path") and row.get("faa_path"))
-            no_fail = pd.isnull(row.get("failed"))
+            no_fail = row.get("failed") is None
 
             if (has_gbf or has_gff_and_faa) and no_fail:
-                file_list.append((
-                    row.get("protein_id"),
-                    row.get("nucleotide_id"),
-                    row.get("gbf_path"),
-                    row.get("gff_path"),
-                    row.get("faa_path"),
-                    row.get("fna_path"),
-                    mod,
-                    wn,
-                    row.get("strand"),
-                    row.get("start"),
-                    row.get("end"),
-                    row["unique_id"],
-                    row.get("input_type"),
-                    sorfs
-                ))
+                file_list.append(
+                    (
+                        row.get("protein_id"),
+                        row.get("nucleotide_id"),
+                        row.get("gbf_path"),
+                        row.get("gff_path"),
+                        row.get("faa_path"),
+                        row.get("fna_path"),
+                        mod,
+                        wn,
+                        row.get("strand"),
+                        row.get("start"),
+                        row.get("end"),
+                        row.get("unique_id"),
+                        row.get("input_type"),
+                        sorfs,
+                    )
+                )
 
         if not file_list:
             console.print("ℹ️  No valid records to extract neighborhoods.")
-            return df, pd.DataFrame(), pd.DataFrame()
+            return df, pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []
 
-        # Run in parallel
-        with Pool(processes=num_threads) as pool:
-            results = pool.starmap(extract_neighborhood, file_list)
+        df_list: list[pl.DataFrame] = []
+        df_list_neigh: list[pl.DataFrame] = []
+        failed_ids: list[str] = []
+        failed_msgs: list[str] = []
 
-        # Separate successes vs failures
-        df_list      = [res[0] for res in results if res[0] is not None]
-        df_list_neigh= [res[1] for res in results if res[1] is not None]
-        failed_ids   = [res[2] for res in results if res[0] is None]
-        failed_msgs  = [res[3] for res in results if res[0] is None]
+        import asyncio
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        
+        use_jupyter = in_jupyter()
+        pbar = None
+        progress = None
+        task = None
+        try:
+            if use_jupyter:
+                from tqdm.notebook import tqdm
+                pbar = tqdm(total=len(file_list), desc="Parsing GBFF")
+            else:
+                from rich.progress import Progress
+                progress = Progress()
+                task = progress.add_task("Parsing GBFF", total=len(file_list))
+                progress.start()
 
-        # Concatenate DataFrames
-        all_prots = pd.concat(df_list,      ignore_index=True) if df_list else pd.DataFrame()
-        all_prots = all_prots.assign(attributes="ID=" + all_prots["id"])
+            # Use ProcessPoolExecutor with 'spawn' context to avoid fork-related deadlocks
+            with ProcessPoolExecutor(max_workers=num_threads, mp_context=_mp.get_context("spawn")) as executor:
+                futures = {executor.submit(_extract_neighborhood_star, item): idx for idx, item in enumerate(file_list)}
+                completed = 0
+                
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    item = file_list[idx]
+                    completed += 1
+                    
+                    try:
+                        res = future.result(timeout=600)  # 10 min timeout per item
+                        if res[0] is not None:
+                            df_list.append(to_polars(res[0]))
+                        if res[1] is not None:
+                            df_list_neigh.append(to_polars(res[1]))
+                        if res[0] is None:
+                            failed_ids.append(res[2])
+                            failed_msgs.append(res[3])
+                    except TimeoutError:
+                        failed_ids.append(str(item))
+                        failed_msgs.append(f"TIMEOUT after 10 minutes")
+                    except Exception as e:
+                        failed_ids.append(str(item))
+                        failed_msgs.append(f"Exception: {type(e).__name__}: {str(e)}")
+                    finally:
+                        if use_jupyter and pbar:
+                            pbar.update(1)
+                        elif progress and task is not None:
+                            progress.advance(task)
+        finally:
+            if pbar:
+                pbar.close()
+            if progress:
+                progress.stop()
+
+        all_prots = pl.concat(df_list, how="vertical") if df_list else pl.DataFrame()
+        if not all_prots.is_empty() and "id" in all_prots.columns:
+            all_prots = all_prots.with_columns((pl.lit("ID=") + pl.col("id")).alias("attributes"))
+
         gff_columns = [
-            "seqid",       # 1. Sequence ID (e.g. contig name)
-            "source",      # 2. Annotation source (e.g. Prokka, GenBank)
-            "type",        # 3. Feature type (e.g. gene, CDS, rRNA)
-            "start",       # 4. Start coordinate (1-based)
-            "end",         # 5. End coordinate (inclusive)
-            "score",       # 6. Score (e.g. alignment score or '.' if not used)
-            "strand",      # 7. Strand ('+' or '-' or '.')
-            "phase",       # 8. Phase (0, 1, 2 for CDS features or '.' otherwise)
-            "attributes"   # 9. Semicolon-separated tag-value pairs (e.g. ID=gene1;Name=recA)
+            "seqid",
+            "source",
+            "type",
+            "start",
+            "end",
+            "score",
+            "strand",
+            "phase",
+            "attributes",
         ]
-        all_gff = all_prots[gff_columns]
-        #remove all_gff columns from all_prots
-        all_prots = all_prots.drop(columns=gff_columns)
+        all_gff = all_prots.select([c for c in gff_columns if c in all_prots.columns]) if not all_prots.is_empty() else pl.DataFrame()
+        all_gff = to_polars(all_gff, schema=GFF) if not all_gff.is_empty() else all_gff
+        if not all_prots.is_empty():
+            all_prots = all_prots.drop([c for c in gff_columns if c in all_prots.columns])
+            all_prots = to_polars(all_prots, schema=PROTEINS)
 
-        all_neigh= pd.concat(df_list_neigh,ignore_index=True) if df_list_neigh else pd.DataFrame()
-        # If we have any neighbors, check for minwin
-        if not all_neigh.empty:
-            # Compute “length” = end_win - start_win
-            all_neigh["length"] = all_neigh["end_win"] - all_neigh["start_win"]
-            #save all_neigh to tsv
-            all_neigh.drop(columns=["sequence"]).to_csv(os.path.join(output_dir, "all_neigh.tsv"), sep="\t", index=False)
-            short_contigs = []
+        all_neigh = pl.concat(df_list_neigh, how="vertical") if df_list_neigh else pl.DataFrame()
+        all_neigh = to_polars(all_neigh, schema=NEIGHBORHOODS) if not all_neigh.is_empty() else all_neigh
+
+        if not all_neigh.is_empty():
+            all_neigh = all_neigh.with_columns((pl.col("end_win") - pl.col("start_win")).alias("length"))
+            all_neigh.drop("sequence").write_csv(os.path.join(output_dir, "all_neigh.tsv"), separator="\t")
+
             if minwin is not None:
                 if minwin_type == "total":
-                    short_contigs = all_neigh.loc[
-                        all_neigh["length"] < minwin, "unique_id"
-                    ].unique().tolist()
+                    short_contigs = all_neigh.filter(pl.col("length") < minwin)["unique_id"].unique().to_list()
                 elif minwin_type == "upstream":
-                    short_contigs = all_neigh.loc[
-                        (all_neigh["start_target"] - all_neigh["start_win"]) < minwin,
-                        "unique_id"
-                    ].unique().tolist()
+                    short_contigs = all_neigh.filter((pl.col("start_target") - pl.col("start_win")) < minwin)["unique_id"].unique().to_list()
                 elif minwin_type == "downstream":
-                    short_contigs = all_neigh.loc[
-                        (all_neigh["end_win"] - all_neigh["end_target"]) < minwin,
-                        "unique_id"
-                    ].unique().tolist()
-                elif minwin_type == "both":
-                    short_contigs = all_neigh.loc[
-                        ((all_neigh["start_target"] - all_neigh["start_win"]) < minwin)
-                        | ((all_neigh["end_win"] - all_neigh["end_target"]) < minwin),
-                        "unique_id"
-                    ].unique().tolist()
+                    short_contigs = all_neigh.filter((pl.col("end_win") - pl.col("end_target")) < minwin)["unique_id"].unique().to_list()
+                else:  # both
+                    short_contigs = all_neigh.filter(
+                        ((pl.col("start_target") - pl.col("start_win")) < minwin)
+                        | ((pl.col("end_win") - pl.col("end_target")) < minwin)
+                    )["unique_id"].unique().to_list()
             else:
                 short_contigs = []
 
-            # Create neighborhood output folder
             neigh_dir = os.path.join(output_dir, "neighborhood")
             os.makedirs(neigh_dir, exist_ok=True)
 
-            # Report any extraction failures
             if failed_ids:
                 console.print(f"[yellow]Failed extractions for {len(failed_ids)} records: {failed_ids}")
 
-            # Mark short contigs as failed
             if short_contigs:
-                df.loc[short_contigs, "failed"] = "Genomic context shorter than minimum window size"
+                df = df.join(
+                    pl.DataFrame({"unique_id": short_contigs, "failed": ["Genomic context shorter than minimum window size"] * len(short_contigs)}),
+                    on="unique_id",
+                    how="left",
+                    suffix="_short",
+                ).with_columns(
+                    pl.when(pl.col("failed_short").is_not_null())
+                    .then(pl.col("failed_short"))
+                    .otherwise(pl.col("failed"))
+                    .alias("failed")
+                ).drop("failed_short")
                 console.print(f"[yellow]{len(short_contigs)} contigs below min window size: {short_contigs}")
 
-            # Mark any failed_ids in df
-            for fid, msg in zip(failed_ids, failed_msgs):
-                df.loc[fid, "failed"] = msg
+            if failed_ids:
+                df = df.join(
+                    pl.DataFrame({"unique_id": failed_ids, "failed": failed_msgs}),
+                    on="unique_id",
+                    how="left",
+                    suffix="_fail",
+                ).with_columns(
+                    pl.when(pl.col("failed_fail").is_not_null())
+                    .then(pl.col("failed_fail"))
+                    .otherwise(pl.col("failed"))
+                    .alias("failed")
+                ).drop("failed_fail")
 
-            # Identify valid unique_ids (those with nucleotide_id not null & no failure)
-            valid_uids = df.loc[
-                df["nucleotide_id"].notnull() & df["failed"].isnull(),
-                "unique_id"
-            ].unique()
+            valid_uids = df.filter(pl.col("nucleotide_id").is_not_null() & pl.col("failed").is_null())["unique_id"].unique().to_list()
 
-            # Build temp_seqid for each neighbor and write neighborhoods.fasta
-            all_neigh["temp_seqid"] = (
-                all_neigh["seqid"].astype(str) + "_" +
-                all_neigh["start_win"].astype(str) + "_" +
-                all_neigh["end_win"].astype(str)
+            all_neigh = all_neigh.with_columns(
+                (
+                    pl.col("seqid").cast(pl.Utf8)
+                    + pl.lit("_")
+                    + pl.col("start_win").cast(pl.Utf8)
+                    + pl.lit("_")
+                    + pl.col("end_win").cast(pl.Utf8)
+                ).alias("temp_seqid")
             )
-            subset_neigh = all_neigh.loc[
-                all_neigh["unique_id"].isin(valid_uids),
-                ["temp_seqid", "sequence"]
-            ].dropna().drop_duplicates(subset=["temp_seqid"])
+            subset_neigh = (
+                all_neigh.filter(pl.col("unique_id").is_in(valid_uids))
+                .select(["temp_seqid", "sequence"])
+                .drop_nulls()
+                .unique(subset=["temp_seqid"])
+            )
 
             neigh_fasta = os.path.join(neigh_dir, "neighborhoods.fasta")
-            if not subset_neigh.empty:
-                subset_neigh.to_fasta("temp_seqid", "sequence", neigh_fasta)
+            if subset_neigh.height > 0:
+                write_fasta(subset_neigh, "temp_seqid", "sequence", neigh_fasta)
 
-            # Save updated records to disk
-            df.to_csv(os.path.join(output_dir, "records.csv"), index=False)
+            df.write_csv(os.path.join(output_dir, "records.csv"), separator=",", quote_style="necessary")
 
-            # Write proteins to results.fasta
-            subset_gff = all_prots.loc[:, ["id", "sequence"]].dropna().drop_duplicates(subset=["id"])
+            subset_gff = (
+                all_prots.select([c for c in ["id", "sequence"] if c in all_prots.columns])
+                .drop_nulls()
+                .unique(subset=["id"])
+            )
             results_fasta = os.path.join(output_dir, "results.fasta")
-            if not subset_gff.empty:
-                subset_gff.to_fasta("id", "sequence", results_fasta)
+            if subset_gff.height > 0:
+                write_fasta(subset_gff, "id", "sequence", results_fasta)
 
             console.print("✔️  Extracted neighborhoods and wrote output files.")
             return df, all_gff, all_prots, all_neigh, valid_uids
 
         else:
-            # If no neighbors were extracted at all, mark all failed & exit
-            for fid, msg in zip(failed_ids, failed_msgs):
-                df.loc[fid, "failed"] = msg
-            df.to_csv(os.path.join(output_dir, "records.csv"), index=False)
+            if failed_ids:
+                df = df.join(
+                    pl.DataFrame({"unique_id": failed_ids, "failed": failed_msgs}),
+                    on="unique_id",
+                    how="left",
+                    suffix="_fail",
+                ).with_columns(
+                    pl.when(pl.col("failed_fail").is_not_null())
+                    .then(pl.col("failed_fail"))
+                    .otherwise(pl.col("failed"))
+                    .alias("failed")
+                ).drop("failed_fail")
+            df.write_csv(os.path.join(output_dir, "records.csv"), separator=",", quote_style="necessary")
             console.print("🚫  [bold red]Aborting! All IDs failed to yield neighborhoods.")
             sys.exit(1)
 
-    # Call the helper to extract neighborhoods
-    
     updated_records, all_gff, all_prots, all_neigh, valid_uids = _extract_neighborhoods(records)
-    add_data = all_prots[all_prots["protein_id"] == all_prots["target_prot"]][["unique_id","target_prot"]]
-    all_neigh["unique_id"] = all_neigh["unique_id"].astype(str)
-    add_data["unique_id"] = add_data["unique_id"].astype(str)
-    all_neigh = all_neigh.merge(add_data, on = "unique_id", how = "left")
+    
+    # Enrich proteins with metadata before returning (use updated_records which has all info)
+    all_prots = _enrich_proteins_with_metadata(all_prots, updated_records, all_neigh)
+    
+    if not all_prots.is_empty() and "protein_id" in all_prots.columns and "target_prot" in all_prots.columns:
+        add_data = all_prots.filter(pl.col("protein_id") == pl.col("target_prot")).select(["unique_id", "target_prot"])
+        all_neigh = all_neigh.join(add_data.with_columns(pl.col("unique_id").cast(pl.Utf8)), on="unique_id", how="left")
 
     return {
         "records": updated_records,
         "all_gff": all_gff,
         "all_prots": all_prots,
         "all_neigh": all_neigh,
-        "valid_uids": valid_uids
+        "valid_uids": valid_uids,
     }

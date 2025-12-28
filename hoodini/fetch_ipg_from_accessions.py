@@ -3,7 +3,7 @@
 import subprocess
 import argparse
 import os
-import pandas as pd
+import polars as pl
 from io import StringIO
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +23,7 @@ MAX_WORKERS = DEFAULT_MAX_CONCURRENT if NCBI_API_KEY else DEFAULT_FALLBACK_CONCU
 MAX_PARALLEL = MAX_WORKERS
 
 def run_efetch_chunk(accessions: list[str]) -> str:
+    import time
     joined_ids = ",".join(accessions)
     cmd = [
         "efetch",
@@ -32,17 +33,49 @@ def run_efetch_chunk(accessions: list[str]) -> str:
         "-mode", "text",
         "-tool", TOOL
     ]
-    try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        return result.stdout
-    except subprocess.CalledProcessError as e:
-        print(f"[ERROR] efetch failed: {e.stderr}")
-        return ""
+    
+    # Retry logic for transient NCBI errors
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=90)
+            if not result.stdout or not result.stdout.strip():
+                if "500" in result.stderr or "ERROR" in result.stderr:
+                    if attempt < max_retries - 1:
+                        print(f"[WARN] efetch error 500/network issue (attempt {attempt+1}/{max_retries}), retrying in 5s...")
+                        time.sleep(5)
+                        continue
+                print(f"[WARN] efetch returned empty for IDs: {accessions[:3]}... (stderr: {result.stderr[:200]})")
+            return result.stdout
+        except subprocess.CalledProcessError as e:
+            if attempt < max_retries - 1:
+                print(f"[WARN] efetch failed (attempt {attempt+1}/{max_retries}): {e.stderr[:200]}, retrying...")
+                time.sleep(5)
+                continue
+            print(f"[ERROR] efetch failed for IDs {accessions[:3]}... after {max_retries} attempts: {e.stderr[:500]}")
+            return ""
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries - 1:
+                print(f"[WARN] efetch timeout (attempt {attempt+1}/{max_retries}), retrying...")
+                time.sleep(5)
+                continue
+            print(f"[ERROR] efetch timeout for IDs {accessions[:3]}... after {max_retries} attempts")
+            return ""
+    
+    return ""
 
-def fetch_ipg_from_accessions(accessions: list[str]) -> pd.DataFrame:
+def fetch_ipg_from_accessions(accessions: list[str]) -> pl.DataFrame:
     """
     Fetch IPG data for a list of protein accessions in parallel with rate limiting.
     """
+    # Check efetch availability
+    try:
+        subprocess.run(["efetch", "-version"], check=True, capture_output=True, timeout=5)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"[ERROR] efetch not available or not working: {e}")
+        return pl.DataFrame()
+    
+    print(f"[DEBUG] Fetching IPG for {len(accessions)} accessions. First 5: {accessions[:5]}")
     semaphore = threading.Semaphore(MAX_PARALLEL)
     chunks = [accessions[i:i + CHUNK_SIZE] for i in range(0, len(accessions), CHUNK_SIZE)]
     results = [None] * len(chunks)
@@ -67,20 +100,27 @@ def fetch_ipg_from_accessions(accessions: list[str]) -> pd.DataFrame:
                 # Parse immediately to avoid holding massive strings in memory
                 if chunk_result and chunk_result.strip():
                     try:
-                        chunk_df = pd.read_csv(StringIO(chunk_result), sep="\t")
-                        chunk_df.columns = [col.lower() for col in chunk_df.columns]
+                        chunk_df = pl.read_csv(
+                            StringIO(chunk_result),
+                            separator="\t",
+                            infer_schema_length=1000,
+                        )
+                        chunk_df = chunk_df.rename({col: col.lower() for col in chunk_df.columns})
                         results[idx] = chunk_df
-                    except Exception:
+                    except Exception as e:
+                        snippet = chunk_result[:200].replace("\n", "\\n")
+                        print(f"[WARN] Failed to parse IPG chunk {idx}: {e}. Snippet: {snippet}")
                         results[idx] = None
                 else:
+                    print(f"[WARN] Empty IPG chunk {idx} returned by efetch")
                     results[idx] = None
                 progress.update(task, advance=1)
 
-    dfs = [df for df in results if df is not None and not df.empty]
+    dfs = [df for df in results if df is not None and df.height > 0]
     if not dfs:
-        return pd.DataFrame()
+        return pl.DataFrame()
     
-    return pd.concat(dfs, ignore_index=True)
+    return pl.concat(dfs, how="vertical")
 
 
 def main():
@@ -94,12 +134,12 @@ def main():
 
     df = fetch_ipg_from_accessions(accessions)
 
-    if df.empty:
+    if df.height == 0:
         print("[WARN] No IPG data retrieved.")
     else:
         out_path = Path(args.output)
-        df.to_csv(out_path, sep="\t", index=False)
-        print(f"[INFO] Saved {len(df)} IPG entries to {out_path}")
+        df.write_csv(out_path, separator="\t")
+        print(f"[INFO] Saved {df.height} IPG entries to {out_path}")
 
 
 if __name__ == "__main__":

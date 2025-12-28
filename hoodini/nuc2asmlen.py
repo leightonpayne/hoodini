@@ -75,7 +75,7 @@ def run_nuc2asmlen(accessions):
         "assemblyAccession": "AssemblyAccession"
     })
 
-    return result.to_pandas()
+    return result
 
 
 # CLI entry point
@@ -88,9 +88,9 @@ def main():
     df = run_nuc2asmlen(args.input_file)
 
     if args.output:
-        df.to_csv(args.output, sep="\t", index=False)
+        df.write_csv(args.output, separator="\t", include_header=False)
     else:
-        sys.stdout.write(df.to_csv(sep="\t", index=False))
+        sys.stdout.write(df.write_csv(separator="\t", include_header=False))
 
 if __name__ == "__main__":
     main()

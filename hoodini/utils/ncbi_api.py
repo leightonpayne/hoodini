@@ -3,7 +3,7 @@ import time
 import os
 import requests
 import itertools
-import pandas as pd
+import polars as pl
 import taxoniq
 import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor
@@ -21,7 +21,7 @@ def nuc2ass(nucleotide_ids, apikey=None, temp_dir="temp", chunk_size=10, max_con
         chunk_size (int, optional): Number of IDs to query per request. Defaults to 100.
     
     Returns:
-        pd.DataFrame: DataFrame containing columns `AccessionVersion`, `AssemblyAccession`, `Taxid`, and `superkingdom`.
+        pl.DataFrame: DataFrame containing columns `AccessionVersion`, `AssemblyAccession`, `Taxid`, and `superkingdom`.
     """
     link_list = create_ncbi_links(
         chunk_list=nucleotide_ids,
@@ -51,9 +51,9 @@ def nuc2ass(nucleotide_ids, apikey=None, temp_dir="temp", chunk_size=10, max_con
     download_files(urls=link_list, folder=f"{temp_dir}/elink", max_concurrent_downloads=max_concurrent)
 
     nuc2ass = parseXML(f"{temp_dir}/elink", "nuc2ass")
-    df_nucsum = df_nucsum.merge(nuc2ass[['id_list', 'linked_id']], left_on='doc_id', right_on='id_list', how='left')
+    df_nucsum = df_nucsum.join(nuc2ass[['id_list', 'linked_id']], left_on='doc_id', right_on='id_list', how='left')
 
-    assembly_ids = df_nucsum['linked_id'].dropna().unique().tolist()
+    assembly_ids = df_nucsum['linked_id'].drop_nulls().unique().to_list()
     link_list = create_ncbi_links(
         chunk_list=assembly_ids,
         engine="efetch",
@@ -72,14 +72,14 @@ def nuc2ass(nucleotide_ids, apikey=None, temp_dir="temp", chunk_size=10, max_con
         t = taxoniq.Taxon(taxid)
         dicc_tax[taxid] = {t.rank.name: t.scientific_name for t in t.ranked_lineage}
 
-    taxdf = pd.DataFrame(dicc_tax).T
-    df_asssum = df_asssum.merge(taxdf, left_on="Taxid", right_index=True, how="left")
+    taxdf = pl.DataFrame(dicc_tax).T
+    df_asssum = df_asssum.join(taxdf, left_on="Taxid", right_index=True, how="left")
 
-    df_nucsum = df_nucsum.merge(df_asssum[['uid', 'AssemblyAccession', 'Taxid', 'superkingdom']], left_on='linked_id', right_on='uid', how='left')
+    df_nucsum = df_nucsum.join(df_asssum[['uid', 'AssemblyAccession', 'Taxid', 'superkingdom']], left_on='linked_id', right_on='uid', how='left')
     #if the AccessionVersion does not contain "_", the AssemblyAccession should start with GCA_. If the Accessionversion contains "_", the AssemblyAccession should start with GCF_
     #remove rows in which AssemblyAccession is missing
     df_nucsum = df_nucsum.dropna(subset=['AssemblyAccession'])
-    df_nucsum["AssemblyAccession"] = df_nucsum.apply(lambda x: f"GCF_{x['AssemblyAccession'].split('_')[1]}" if "_" in x['AccessionVersion'] else f"GCA_{x['AssemblyAccession'].split('_')[1]}", axis=1)
+    df_nucsum["AssemblyAccession"] = df_nucsum.apply(lambda x: f"GCF_{x['AssemblyAccession'].split('_')[1]}" if "_" in x['AccessionVersion'] else f"GCA_{x['AssemblyAccession'].split('_')[1]}", how="horizontal")
 
     
 
@@ -98,7 +98,7 @@ def nuc2len(nucleotide_ids, apikey, temp_dir="temp", chunk_size=100, max_concurr
         chunk_size (int, optional): Number of IDs to query per request. Defaults to 100.
     
     Returns:
-        pd.DataFrame: DataFrame containing columns `AccessionVersion`, `AssemblyAccession`, `Taxid`, and `superkingdom`.
+        pl.DataFrame: DataFrame containing columns `AccessionVersion`, `AssemblyAccession`, `Taxid`, and `superkingdom`.
     """
     link_list = create_ncbi_links(
         chunk_list=nucleotide_ids,
@@ -115,8 +115,8 @@ def nuc2len(nucleotide_ids, apikey, temp_dir="temp", chunk_size=100, max_concurr
     df_nucsum = df_nucsum[df_nucsum["doc_id"] != "0"]
 
     df_nucsum = df_nucsum[["AccessionVersion","Length"]]
-    #rename accessionversion to nucleotide_id and Length to nucleotide_length
-    df_nucsum.rename(columns={"AccessionVersion":"nucleotide_id","Length":"nucleotide_length"},inplace=True)
+    # rename accessionversion to nucleotide_id and Length to nucleotide_length (Polars returns new df)
+    df_nucsum = df_nucsum.rename({"AccessionVersion": "nucleotide_id", "Length": "nucleotide_length"})
     return df_nucsum
 
 
@@ -213,7 +213,7 @@ def parseXML(folder_path, mode):
     
     all_file_paths = [os.path.join(folder_path, filename) for filename in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, filename))]
     
-    final_df = pd.DataFrame()
+    final_df = pl.DataFrame()
 
     # Use ProcessPoolExecutor for parallel processing
     with ProcessPoolExecutor() as executor:
@@ -222,6 +222,6 @@ def parseXML(folder_path, mode):
 
         # Combine all resulting dataframes
         for df in results:
-            final_df = pd.concat([final_df, df], ignore_index=True) if not final_df.empty else df
+            final_df = pl.concat([final_df, df], how="vertical") if final_df.height > 0 else df
 
     return final_df

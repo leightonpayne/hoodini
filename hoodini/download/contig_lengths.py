@@ -308,16 +308,16 @@ def download_contig_lengths(api_key: Optional[str] = None, workers: int = 10, sk
     missing, latest_mtime = get_missing_contigs_from_summary(ASSEMBLY_SUMMARY, allowed_assemblies=allowed_assemblies)
 
     if latest_mtime is not None and missing:
-        import pandas as pd
-        asm_df = pd.read_parquet(ASSEMBLY_SUMMARY)
+        import polars as pl
+        asm_df = pl.read_parquet(ASSEMBLY_SUMMARY)
         if "seq_rel_date" in asm_df.columns:
-            asm_df["seq_rel_date"] = pd.to_datetime(asm_df["seq_rel_date"], errors="coerce", infer_datetime_format=True)
-            asm_dates = dict(zip(asm_df["assembly_accession"].astype(str), asm_df["seq_rel_date"]))
-            latest_ts = pd.to_datetime(latest_mtime, unit="s")
+            asm_df = asm_df.with_columns(pl.col("seq_rel_date").str.to_date())
+            asm_dates = dict(zip(asm_df["assembly_accession"].cast(pl.Utf8), asm_df["seq_rel_date"]))
+            latest_ts = pl.datetime(latest_mtime, time_unit="s")
             filtered = []
             for aid in missing:
                 dt = asm_dates.get(str(aid))
-                if pd.isna(dt) or dt.to_datetime64() > latest_ts.to_datetime64():
+                if dt is None or dt > latest_ts:
                     filtered.append(aid)
             console.log(f"Filtered missing assemblies by seq_rel_date vs latest parquet mtime: {len(filtered)} remain")
             missing = filtered
@@ -330,7 +330,7 @@ def download_contig_lengths(api_key: Optional[str] = None, workers: int = 10, sk
 
     df_links = get_prefetched_link_table(missing, kinds=["sequence_report"], seqrep_only=True)
     pairs: List[Tuple[str, str]] = []
-    for _, row in df_links.iterrows():
+    for row in df_links.iter_rows(named=True):
         if row.get("filetype") == "sequence_report":
             pairs.append((row.get("assembly_id"), row.get("url")))
 

@@ -2,7 +2,7 @@ import pyhmmer
 import multiprocessing
 from functools import partial
 from rich.progress import Progress
-import pandas as pd
+import polars as pl
 from networkx.utils.union_find import UnionFind
 import argparse
 
@@ -42,7 +42,7 @@ def cluster_jackhmmer_results(dicc_hits, min_evalue=1e-10):
         representative = next(iter(group))
         for member in group:
             data.append([representative, member])
-    df = pd.DataFrame(data, columns=["clu_rep_seq","member"])
+    df = pl.DataFrame(data, columns=["clu_rep_seq","member"])
     return df
 
 def parallel_jackhmmer(faa, cpus=multiprocessing.cpu_count(), max_iterations=3, min_evalue=1e-10):
@@ -61,7 +61,7 @@ def main():
 
     df = parallel_jackhmmer(args.fasta, args.cpus, args.max_iterations, args.min_evalue)
 
-    df.to_csv(args.output, index=False, header=False)  # Save the DataFrame to the output file
+    df.write_csv(args.output, include_header=False)  # Save the DataFrame to the output file
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 import collections
-import pandas as pd
+import polars as pl
 import pyhmmer
 from pyhmmer import easel
 from pyhmmer.plan7 import HMMFile
@@ -21,10 +21,15 @@ def run_antidefense(all_gff, output, num_threads):
             if hit.included:
                 results_anti.append(Result(hit.name.decode(), hmm, hit.score, hit.evalue))
     if results_anti:
-        df_anti = pd.DataFrame(results_anti)
-        df_anti = df_anti.sort_values(by=["id", "anti_bitscore"], ascending=False)
-        all_gff = pd.merge(all_gff, df_anti, on="id", how="left")
-        all_gff["linecolor"] = all_gff.apply(
-            lambda x: [255, 0, 0, 255] if pd.notna(x["anti_name"]) else x["linecolor"], axis=1
+        df_anti = pl.DataFrame(results_anti)
+        df_anti = df_anti.sort(["id", "anti_bitscore"], descending=[False, True])
+        # left join on id
+        all_gff = all_gff.join(df_anti, on="id", how="left")
+        # set linecolor to red when anti_name is present
+        all_gff = all_gff.with_columns(
+            pl.when(pl.col("anti_name").is_not_null())
+            .then(pl.lit([255, 0, 0, 255]))
+            .otherwise(pl.col("linecolor"))
+            .alias("linecolor")
         )
     return all_gff

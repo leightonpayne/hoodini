@@ -85,9 +85,6 @@ Options for `hoodini run` (all flags may also be present in a TOML config and ar
 - `--num-threads <int>`
    - Number of worker threads to use where parallelism is supported.
 
-- `--assembly-folder <path>`
-   - Path to a local assembly folder (use local copies instead of downloading).
-
 - `--assembly-db <path>`
    - Path to an assembly database (precomputed index / parquet file).
 

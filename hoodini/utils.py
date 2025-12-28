@@ -106,11 +106,6 @@ click.rich_click.STYLE_HELP_OPTIONS_DEFAULTS = "dim"
     help="Number of threads."
 )
 @click.option(
-    "--assembly-folder", "assembly_folder",
-    default=TOML_DEFAULTS.get("assembly_folder", None),
-    help="Path to a local assembly folder."
-)
-@click.option(
     "--assembly-db",
     "assembly_db",
     default=TOML_DEFAULTS.get(

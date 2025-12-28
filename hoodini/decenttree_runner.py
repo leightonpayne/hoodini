@@ -17,7 +17,7 @@ import csv
 from typing import Iterable, Optional
 from importlib.resources import files
 
-import pandas as pd
+import polars as pl
 
 
 def _choose_decenttree_binary() -> Path:
@@ -62,7 +62,7 @@ def _normalize_algorithm(name: str) -> str:
     return cand
 
 
-def _build_relaxed_phylip(df: pd.DataFrame, qcol: str, tcol: str, dcol: str, out_path: Path, fill_missing=None) -> None:
+def _build_relaxed_phylip(df: pl.DataFrame, qcol: str, tcol: str, dcol: str, out_path: Path, fill_missing=None) -> None:
     """Create a relaxed PHYLIP-like matrix (tab-separated) at out_path.
 
     The matrix will include all unique sequence ids found in qcol and tcol,
@@ -75,7 +75,15 @@ def _build_relaxed_phylip(df: pd.DataFrame, qcol: str, tcol: str, dcol: str, out
         # If fill_missing is a tuple (fill_missing_value, ids)
         fill_value, ids = fill_missing
     else:
-        ids = pd.unique(df[[qcol, tcol]].values.ravel())
+        # Build the complete set of ids from both columns using Polars-only ops
+        ids = (
+            pl.concat([
+                df.select(pl.col(qcol).cast(pl.Utf8)).to_series(),
+                df.select(pl.col(tcol).cast(pl.Utf8)).to_series(),
+            ])
+            .unique()
+            .to_list()
+        )
         fill_value = fill_missing
     ids = list(ids)
     id_index = {idv: i for i, idv in enumerate(ids)}
@@ -86,7 +94,8 @@ def _build_relaxed_phylip(df: pd.DataFrame, qcol: str, tcol: str, dcol: str, out
         fill_value = 0.0
     elif isinstance(fill_value, str):
         sval = fill_value.lower()
-        vals = df[dcol].dropna().astype(float).values
+        vals_series = df.select(pl.col(dcol).cast(pl.Float64, strict=False)).to_series()
+        vals = vals_series.drop_nulls().to_numpy()
         if vals.size == 0:
             fill_value = 0.0
         elif sval == "max":
@@ -107,8 +116,13 @@ def _build_relaxed_phylip(df: pd.DataFrame, qcol: str, tcol: str, dcol: str, out
     # Initialize matrix with fill_value
     mat = [[fill_value] * n for _ in range(n)]
 
-    # Build a lookup for distances
-    df_lookup = df.set_index([qcol, tcol])[dcol]
+    # Build a lookup for distances (dict keyed by (q, t))
+    df_lookup = dict(
+        zip(
+            zip(df[qcol].to_list(), df[tcol].to_list()),
+            df[dcol].to_list(),
+        )
+    )
 
     # Fill matrix with provided distances for all pairs in ids
     for i, q in enumerate(ids):
@@ -119,7 +133,7 @@ def _build_relaxed_phylip(df: pd.DataFrame, qcol: str, tcol: str, dcol: str, out
                 v = df_lookup.get((q, t))
             elif (t, q) in df_lookup:
                 v = df_lookup.get((t, q))
-            if v is not None and not pd.isna(v):
+            if v is not None and v is not None:
                 try:
                     d = float(v)
                     mat[i][j] = d
@@ -139,7 +153,7 @@ def _build_relaxed_phylip(df: pd.DataFrame, qcol: str, tcol: str, dcol: str, out
             writer.writerow(row)
 
 
-def run_decenttree_from_table(df: pd.DataFrame,
+def run_decenttree_from_table(df: pl.DataFrame,
                               qcol: str = "query",
                               tcol: str = "target",
                               dcol: str = "distance",
@@ -148,46 +162,35 @@ def run_decenttree_from_table(df: pd.DataFrame,
                               decenttree_bin: Optional[Path] = None,
                               fill_missing=None,
                               ids: Optional[Iterable[str]] = None) -> str:
-    """Run DecentTree on the provided pairwise distance table and return Newick string.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Table containing pairwise distances.
-    qcol, tcol, dcol : str
-        Column names for query id, target id, and distance.
-    algorithm : str
-        Algorithm to pass to DecentTree via `-t` (e.g., 'nj' or others supported).
-    threads : int
-        Number of threads to pass to DecentTree via `-nt`.
-    decenttree_bin : Path, optional
-        Explicit path to binary; if None the bundled extra_tools binary is used.
-    ids : Optional[Iterable[str]], optional
-        List of ids to ensure are present in the matrix.
-
-    Returns
-    -------
-    str
-        Newick tree string returned by DecentTree.
-    """
+    """Run DecentTree on a Polars pairwise distance table and return a Newick string."""
     if decenttree_bin is None:
         decenttree_bin = _choose_decenttree_binary()
 
     # Prepare a working DataFrame dt_df that contains qcol, tcol, dcol (distance)
-    dt_df = df.copy()
+    dt_df = df.clone() if hasattr(df, "clone") else df.select([c for c in df.columns])
 
     # If the table contains AAI or ANI columns, convert to distance (100 - value).
     if 'AAI' in dt_df.columns and dcol not in dt_df.columns:
-        dt_df['AAI'] = pd.to_numeric(dt_df['AAI'], errors='coerce')
-        if dt_df['AAI'].max() <= 1.0:
-            dt_df['AAI'] = dt_df['AAI'] * 100.0
-        dt_df['distance'] = 100.0 - dt_df['AAI']
+        # Convert AAI column to numeric
+        try:
+            dt_df = dt_df.with_columns(pl.col('AAI').cast(pl.Float64))
+        except Exception:
+            pass
+        aai_max = dt_df['AAI'].max()
+        if aai_max is not None and aai_max <= 1.0:
+            dt_df = dt_df.with_columns((pl.col('AAI') * 100.0).alias('AAI'))
+        dt_df = dt_df.with_columns((100.0 - pl.col('AAI')).alias('distance'))
         dcol_use = 'distance'
     elif 'ANI' in dt_df.columns and dcol not in dt_df.columns:
-        dt_df['ANI'] = pd.to_numeric(dt_df['ANI'], errors='coerce')
-        if dt_df['ANI'].max() <= 1.0:
-            dt_df['ANI'] = dt_df['ANI'] * 100.0
-        dt_df['distance'] = 100.0 - dt_df['ANI']
+        # Convert ANI column to numeric
+        try:
+            dt_df = dt_df.with_columns(pl.col('ANI').cast(pl.Float64))
+        except Exception:
+            pass
+        ani_max = dt_df['ANI'].max()
+        if ani_max is not None and ani_max <= 1.0:
+            dt_df = dt_df.with_columns((pl.col('ANI') * 100.0).alias('ANI'))
+        dt_df = dt_df.with_columns((100.0 - pl.col('ANI')).alias('distance'))
         dcol_use = 'distance'
     else:
         dcol_use = dcol
@@ -201,7 +204,14 @@ def run_decenttree_from_table(df: pd.DataFrame,
     if ids is not None:
         valid_uids = [str(x) for x in ids]
     else:
-        valid_uids = list(pd.unique(dt_df[[qcol, tcol]].values.ravel()))
+        valid_uids = (
+            pl.concat([
+                dt_df.select(pl.col(qcol).cast(pl.Utf8)).to_series(),
+                dt_df.select(pl.col(tcol).cast(pl.Utf8)).to_series(),
+            ])
+            .unique()
+            .to_list()
+        )
 
     with tempfile.TemporaryDirectory() as td:
         tdpth = Path(td)
@@ -224,25 +234,20 @@ def run_decenttree_from_table(df: pd.DataFrame,
     return newick.strip()
 
 
-def run_decenttree_from_matrix(matrix_df: pd.DataFrame,
+def run_decenttree_from_matrix(matrix_df: pl.DataFrame,
                                 algorithm: str = "nj",
                                 threads: int = 1,
                                 decenttree_bin: Optional[Path] = None) -> str:
-    """Run DecentTree on a square distance matrix (pandas DataFrame) and return Newick.
+    """Run DecentTree on a square distance matrix (Polars) and return Newick."""
+    if not isinstance(matrix_df, pl.DataFrame):
+        raise TypeError("matrix_df must be a Polars DataFrame with an 'id' column")
 
-    matrix_df must be square with identical index and columns in the same order.
-    """
-    if not isinstance(matrix_df, pd.DataFrame):
-        raise TypeError("matrix_df must be a pandas.DataFrame")
-    if matrix_df.shape[0] != matrix_df.shape[1]:
-        raise ValueError("matrix_df must be square")
-    if not all(str(i) == str(c) for i, c in zip(matrix_df.index.astype(str), matrix_df.columns.astype(str))):
-        # reorder columns to match index if possible
-        cols = [c for c in matrix_df.index.astype(str) if c in matrix_df.columns]
-        if len(cols) == matrix_df.shape[0]:
-            matrix_df = matrix_df.loc[:, cols]
-        else:
-            raise ValueError("matrix_df index and columns must contain the same labels")
+    if "id" not in matrix_df.columns:
+        raise ValueError("matrix_df must contain an 'id' column for row labels")
+
+    cols = [c for c in matrix_df.columns if c != "id"]
+    if len(cols) != matrix_df.height:
+        raise ValueError("matrix_df must be square with one 'id' column and the remaining columns as samples")
 
     if decenttree_bin is None:
         decenttree_bin = _choose_decenttree_binary()
@@ -252,14 +257,13 @@ def run_decenttree_from_matrix(matrix_df: pd.DataFrame,
         phylip_path = tdpth / "matrix.phylip"
         out_newick = tdpth / "tree.nwk"
 
-        # write relaxed phylip
-        ids = [str(i) for i in matrix_df.index]
-        n = len(ids)
+        ids = [str(x) for x in matrix_df["id"].to_list()]
         with open(phylip_path, "w", newline="") as fh:
-            fh.write(f"{n}\n")
+            fh.write(f"{len(ids)}\n")
             writer = csv.writer(fh, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
             for i, idv in enumerate(ids):
-                row = [idv] + [str(x) for x in matrix_df.iloc[i].tolist()]
+                row_vals = [matrix_df[c][i] for c in cols]
+                row = [idv] + [str(x) for x in row_vals]
                 writer.writerow(row)
         alg = _normalize_algorithm(algorithm)
         cmd = [str(decenttree_bin), "-in", str(phylip_path), "-out", str(out_newick), "-t", alg, "-nt", str(int(threads))]

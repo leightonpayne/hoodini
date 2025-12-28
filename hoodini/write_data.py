@@ -2,20 +2,23 @@ from pathlib import Path
 from typing import Optional, Dict
 
 import base64
-import pandas as pd
+import polars as pl
 from importlib.resources import files
+from hoodini.utils.polars_adapters import to_polars
+
 
 def write_viz_outputs(
     *,
     output_dir: str,
-    all_gff: pd.DataFrame,
-    all_neigh: pd.DataFrame,
-    all_prots: pd.DataFrame,
-    den_data: pd.DataFrame,
+    all_gff: pl.DataFrame,
+    all_neigh: pl.DataFrame,
+    all_prots: pl.DataFrame,
+    den_data: pl.DataFrame,
     tree_str: str,
-    nt_links: Optional[pd.DataFrame] = None,
-    pairwise_aa: Optional[pd.DataFrame] = None,
-    domains_data: Optional[pd.DataFrame] = None,
+    records: Optional[pl.DataFrame] = None,
+    nt_links: Optional[pl.DataFrame] = None,
+    pairwise_aa: Optional[pl.DataFrame] = None,
+    domains_data: Optional[pl.DataFrame] = None,
     write_domains: bool = False,
 ) -> Path:
     """
@@ -25,71 +28,113 @@ def write_viz_outputs(
     """
     outdir = Path(output_dir) / "hoodini-viz"
     outdir.mkdir(parents=True, exist_ok=True)
+    
+    # Enrich all_prots with metadata if records are provided
+    if records is not None:
+        all_prots = enrich_proteins_for_visualization(all_prots, records, all_neigh)
+
+    # Ensure Polars DataFrames for consistent operations
+    all_gff = to_polars(all_gff) if all_gff is not None else pl.DataFrame()
+    all_neigh = to_polars(all_neigh) if all_neigh is not None else pl.DataFrame()
+    all_prots = to_polars(all_prots) if all_prots is not None else pl.DataFrame()
+    den_data = to_polars(den_data) if den_data is not None else pl.DataFrame()
+    nt_links = to_polars(nt_links) if nt_links is not None else None
+    pairwise_aa = to_polars(pairwise_aa) if pairwise_aa is not None else None
+    domains_data = to_polars(domains_data) if domains_data is not None else None
 
     # GFF
-    if all_gff is not None and not all_gff.empty:
-        all_gff.to_csv(outdir / "defaultGFF.gff", index=False, sep="\t", header=False)
+    if all_gff is not None and all_gff.height > 0:
+        all_gff.write_csv(outdir / "defaultGFF.gff", include_header=False, separator="\t")
     else:
         # write empty placeholder
-        pd.DataFrame().to_csv(outdir / "defaultGFF.gff", index=False, sep="\t", header=False)
+        pl.DataFrame().write_csv(outdir / "defaultGFF.gff", include_header=False, separator="\t")
 
     # Baselines
-    if all_neigh is not None and not all_neigh.empty:
-        neigh = all_neigh.copy()
-        neigh = neigh.rename(
-            columns={
-                "unique_id": "hood_id",
-                "start_win": "start",
-                "end_win": "end",
-                "target_prot": "align_gene",
-            }
-        )
+    baseline_headers = "hood_id\tseqid\tstart\tend\talign_gene\n"
+    if all_neigh is not None and all_neigh.height > 0:
+        neigh = all_neigh.clone()
+        mapping = {
+            "unique_id": "hood_id",
+            "start_win": "start",
+            "end_win": "end",
+            "target_prot": "align_gene",
+        }
+        present_map = {k: v for k, v in mapping.items() if k in neigh.columns}
+        if present_map:
+            neigh = neigh.rename(present_map)
         cols = [c for c in ["hood_id", "seqid", "start", "end", "align_gene"] if c in neigh.columns]
-        pd.DataFrame(columns=["hood_id", "seqid", "start", "end", "align_gene"]) \
-            if not cols else neigh[cols] \
-            .to_csv(outdir / "defaultBaselines.txt", sep="\t", index=False)
+        if cols:
+            csv_data = neigh.select(cols).write_csv(separator="\t", include_header=False)
+            (outdir / "defaultBaselines.txt").write_text(baseline_headers + csv_data, encoding="utf-8")
+        else:
+            (outdir / "defaultBaselines.txt").write_text(baseline_headers, encoding="utf-8")
     else:
-        pd.DataFrame(columns=["hood_id", "seqid", "start", "end", "align_gene"]).to_csv(
-            outdir / "defaultBaselines.txt", sep="\t", index=False
-        )
+        (outdir / "defaultBaselines.txt").write_text(baseline_headers, encoding="utf-8")
 
     # Protein metadata
-    if all_prots is not None and not all_prots.empty:
-        prots = all_prots.copy()
-        prots = prots.rename(columns={"fam_cluster": "cluster"})
-        #exclude "protein_id" from the output
-        prots = prots[[c for c in prots.columns if c != "protein_id"]]
-        if "product" in prots.columns:
-            prots["product"] = prots["product"].astype(str).str.replace("\n", " ")
-        prots.to_csv(outdir / "defaultProteinMetadata.txt", sep="\t", index=False)
+    # Build dynamic headers: base 7 columns + any extra columns from extra tools
+    base_headers = ["id", "sequence", "product", "target_prot", "target_nuc", "unique_id", "cluster"]
+    if all_prots is not None and all_prots.height > 0:
+        prots = all_prots.clone()
+        if "fam_cluster" in prots.columns:
+            prots = prots.rename({"fam_cluster": "cluster"})
+        
+        # Ensure all required base columns exist, filling missing ones with empty strings
+        for col in ["target_prot", "target_nuc", "unique_id"]:
+            if col not in prots.columns:
+                prots = prots.with_columns(pl.lit("").alias(col))
+        
+        # Ensure cluster is integer (or null) - round float values
+        if "cluster" not in prots.columns:
+            prots = prots.with_columns(pl.lit(None).alias("cluster"))
+        else:
+            prots = prots.with_columns(pl.col("cluster").round().cast(pl.Int64))
+        
+        # Select columns in order: base columns first, then any additional columns from extra tools
+        base_cols = ["id", "sequence", "product", "target_prot", "target_nuc", "unique_id", "cluster"]
+        base_cols_present = [c for c in base_cols if c in prots.columns]
+        extra_cols = [c for c in prots.columns if c not in base_cols]
+        prots = prots.select(base_cols_present + extra_cols)
+        
+        # Sanitize string columns: remove newlines, carriage returns, and dangerous chars
+        # Sanitize all string-type columns to prevent JS injection/errors
+        for col in prots.columns:
+            col_dtype = prots.schema.get(col)
+            if col_dtype == pl.Utf8 or col_dtype == pl.String:
+                prots = prots.with_columns(
+                    pl.col(col).cast(pl.Utf8)
+                    .str.replace_all("\r\n", " ")   # Windows newlines
+                    .str.replace_all("\n", " ")      # Unix newlines
+                    .str.replace_all("\r", " ")      # Old Mac newlines
+                    .str.replace_all("`", "'")       # Replace backticks with single quotes
+                    .str.replace_all('"', "'")       # Collapse double quotes to single quotes
+                    .alias(col)
+                )
+        csv_data = prots.write_csv(separator="\t", include_header=False)
+        # Build dynamic header from all columns in the dataframe
+        protein_headers = "\t".join(prots.columns) + "\n"
+        (outdir / "defaultProteinMetadata.txt").write_text(protein_headers + csv_data, encoding="utf-8")
     else:
-        pd.DataFrame(columns=["gene_id", "cluster", "product"]).to_csv(
-            outdir / "defaultProteinMetadata.txt", sep="\t", index=False
-        )
+        # If empty, write header with base columns only
+        protein_headers = "\t".join(base_headers) + "\n"
+        (outdir / "defaultProteinMetadata.txt").write_text(protein_headers, encoding="utf-8")
 
     # Tree metadata
-    if den_data is not None and not den_data.empty:
-        tree_meta = den_data.copy()
-        tree_meta = tree_meta.rename(columns={"unique_id": "leaf_id"})
-        if "leaf_id" in tree_meta.columns:
-            # Extract numeric id if possible
-            tree_meta["leaf_id"] = (
-                tree_meta["leaf_id"].astype(str).str.extract(r"(\d+)")
-            )
-            # Keep as string if extraction fails
-            try:
-                tree_meta["leaf_id"] = tree_meta["leaf_id"].astype(int)
-            except Exception:
-                pass
-        tree_meta.to_csv(outdir / "defaultTreeMetadata.txt", sep="\t", index=False)
+    tree_headers = "leaf_id\tog_index\tsuperkingdom\tkingdom\tphylum\tclass\torder\tfamily\tgenus\tspecies\tstart_win\tend_win\tstrand_win\tstart_target\tend_target\n"
+    if den_data is not None and den_data.height > 0:
+        tree_meta = den_data.clone()
+        if "unique_id" in tree_meta.columns:
+            tree_meta = tree_meta.rename({"unique_id": "leaf_id"})
+        csv_data = tree_meta.write_csv(separator="\t", include_header=False)
+        (outdir / "defaultTreeMetadata.txt").write_text(tree_headers + csv_data, encoding="utf-8")
     else:
-        pd.DataFrame(columns=["leaf_id"]).to_csv(outdir / "defaultTreeMetadata.txt", sep="\t", index=False)
+        (outdir / "defaultTreeMetadata.txt").write_text(tree_headers, encoding="utf-8")
 
     # Newick tree
     (outdir / "defaultNewick.txt").write_text(tree_str or "", encoding="utf-8")
 
     # Domain metadata (optional)
-    if write_domains and domains_data is not None and not domains_data.empty:
+    if write_domains and domains_data is not None and domains_data.height > 0:
         # Order columns so the frontend parser (which expects token[4] to be evalue)
         # receives: protein_id, domain_id, start, end, e_value, cov, database
         cols = [c for c in ["protein_id", "domain_id", "start", "end", "database", "e_value", "cov"] if c in domains_data.columns]
@@ -100,7 +145,7 @@ def write_viz_outputs(
 
         def format_evalue(val):
             try:
-                if pd.isna(val):
+                if val is None:
                     return ""
                 f = float(val)
             except Exception:
@@ -110,7 +155,7 @@ def write_viz_outputs(
 
         def format_float_2(val):
             try:
-                if pd.isna(val):
+                if val is None:
                     return ""
                 f = float(val)
             except Exception:
@@ -118,27 +163,37 @@ def write_viz_outputs(
             return "{:.2f}".format(f)
 
         if cols:
-            df_domains = domains_data[cols].copy()
+            df_domains = domains_data.select(cols)
             # format e_value and cov if present
             if 'e_value' in df_domains.columns:
-                df_domains['e_value'] = df_domains['e_value'].apply(format_evalue)
+                df_domains = df_domains.with_columns(pl.col('e_value').map_elements(format_evalue).alias('e_value'))
             if 'cov' in df_domains.columns:
-                df_domains['cov'] = df_domains['cov'].apply(format_float_2)
+                df_domains = df_domains.with_columns(pl.col('cov').map_elements(format_float_2).alias('cov'))
 
-            df_domains.to_csv(outdir / "defaultDomains.txt", sep="\t", index=False, header=False)
+            df_domains.write_csv(outdir / "defaultDomains.txt", separator="\t", include_header=False)
 
             # format metadata floats to two decimals (and e_value specially)
-            df_meta = domains_data[desired_cols].copy()
+            df_meta = domains_data.select(desired_cols)
+            def _format_any(val, col):
+                if col == 'e_value':
+                    return format_evalue(val)
+                try:
+                    if isinstance(val, float):
+                        return format_float_2(val)
+                except Exception:
+                    pass
+                return val
             for c in df_meta.columns:
                 if c == 'e_value':
-                    df_meta[c] = df_meta[c].apply(format_evalue)
-                elif pd.api.types.is_float_dtype(df_meta[c].dtype):
-                    df_meta[c] = df_meta[c].apply(format_float_2)
+                    df_meta = df_meta.with_columns(pl.col(c).map_elements(format_evalue).alias(c))
+                else:
+                    df_meta = df_meta.with_columns(pl.col(c).map_elements(format_float_2).alias(c))
 
-            df_meta.to_csv(outdir / "defaultDomainsMetadata.txt", sep="\t", index=False)
+            # Write metadata with headers so downstream consumers can parse column names
+            df_meta.write_csv(outdir / "defaultDomainsMetadata.txt", separator="\t", include_header=True)
 
     # Nucleotide links
-    if nt_links is not None and isinstance(nt_links, pd.DataFrame) and not nt_links.empty:
+    if nt_links is not None and isinstance(nt_links, pl.DataFrame) and nt_links.height > 0:
         cols = [
             "query",
             "query_start",
@@ -150,26 +205,24 @@ def write_viz_outputs(
         ]
         present = [c for c in cols if c in nt_links.columns]
         if len(present) == len(cols):
-            nt_links[cols].to_csv(outdir / "defaultNucleotideLinks.txt", sep="\t", index=False, header=False)
+            nt_links.select(cols).write_csv(outdir / "defaultNucleotideLinks.txt", separator="\t", include_header=False)
         else:
-            pd.DataFrame(columns=cols).to_csv(outdir / "defaultNucleotideLinks.txt", sep="\t", index=False, header=False)
+            pl.DataFrame({c: [] for c in cols}).write_csv(outdir / "defaultNucleotideLinks.txt", separator="\t", include_header=False)
     else:
-        pd.DataFrame(columns=["query", "query_start", "query_end", "ref", "ref_start", "ref_end", "ani"]).to_csv(
-            outdir / "defaultNucleotideLinks.txt", sep="\t", index=False, header=False
-        )
+        pl.DataFrame({c: [] for c in ["query", "query_start", "query_end", "ref", "ref_start", "ref_end", "ani"]}).write_csv(
+            outdir / "defaultNucleotideLinks.txt", separator="\t", include_header=False)
 
     # Protein links
-    if pairwise_aa is not None and isinstance(pairwise_aa, pd.DataFrame) and not pairwise_aa.empty:
+    if pairwise_aa is not None and isinstance(pairwise_aa, pl.DataFrame) and pairwise_aa.height > 0:
         cols = ["qseqid", "sseqid", "pident"]
         present = [c for c in cols if c in pairwise_aa.columns]
         if len(present) == len(cols):
-            pairwise_aa[cols].to_csv(outdir / "defaultProteinLinks.txt", sep="\t", index=False, header=False)
+            pairwise_aa.select(cols).write_csv(outdir / "defaultProteinLinks.txt", separator="\t", include_header=False)
         else:
-            pd.DataFrame(columns=cols).to_csv(outdir / "defaultProteinLinks.txt", sep="\t", index=False, header=False)
+            pl.DataFrame({c: [] for c in cols}).write_csv(outdir / "defaultProteinLinks.txt", separator="\t", include_header=False)
     else:
-        pd.DataFrame(columns=["qseqid", "sseqid", "pident"]).to_csv(
-            outdir / "defaultProteinLinks.txt", sep="\t", index=False, header=False
-        )
+        pl.DataFrame({c: [] for c in ["qseqid", "sseqid", "pident"]}).write_csv(
+            outdir / "defaultProteinLinks.txt", separator="\t", include_header=False)
 
 
     # Prefer package resource; fall back to relative path if needed
@@ -179,7 +232,7 @@ def write_viz_outputs(
     template_html = resource_template.read_text(encoding="utf-8")
 
 
-    # Prepare data for embedding
+    # Prepare data for embedding - escape for JS template literals
     def escape_js_string(s):
         """
         Escapes backticks, backslashes, and newlines for safe JS template literal embedding.
@@ -188,6 +241,7 @@ def write_viz_outputs(
             return ""
         return (
             s.replace('\\', r'\\')
+             .replace('"', r'\"')
              .replace('`', r'\`')
              .replace('\r', '')
              .replace('\n', r'\n')
@@ -199,7 +253,6 @@ def write_viz_outputs(
             return escape_js_string(raw)
         except Exception:
             return ""
-
 
     viz_files = {
         "GFF_ANNOTATION_DATA": outdir / "defaultGFF.gff",

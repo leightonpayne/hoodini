@@ -1,12 +1,12 @@
-import pandas as pd
+import polars as pl
 from hoodini.utils.core import console
 
 def run_extra_annotations(
     *,
-    records: pd.DataFrame,
-    all_gff: pd.DataFrame,
-    all_neigh: pd.DataFrame,
-    den_data: pd.DataFrame,
+    records: pl.DataFrame,
+    all_gff: pl.DataFrame,
+    all_neigh: pl.DataFrame,
+    den_data: pl.DataFrame,
     output: str,
     domains: str = None,
     domains_metadata: str = None,
@@ -40,9 +40,9 @@ def run_extra_annotations(
         - domains_data: Domain annotation metadata.
         - genomad_df: Virus/plasmid annotations from GenoMAD.
     """
-    domains_data = pd.DataFrame()
-    genomad_df = pd.DataFrame()
-    nc_data = pd.DataFrame()
+    domains_data = pl.DataFrame()
+    genomad_df = pl.DataFrame()
+    nc_data = pl.DataFrame()
     columns = list(all_gff.columns)
 
     # Domain annotation

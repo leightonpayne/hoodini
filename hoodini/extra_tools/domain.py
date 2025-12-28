@@ -1,5 +1,5 @@
 import collections
-import pandas as pd
+import polars as pl
 import pyhmmer
 from pyhmmer import easel
 from pyhmmer.plan7 import HMMFile
@@ -8,30 +8,22 @@ import os
 from importlib.resources import files
 
 
-def deduplicate_domains(df, gap_threshold=10, max_overlap=5, per_database=False):
-    """
-    Deduplicate domain hits by merging adjacent fragments of the same domain and
-    removing overlapping, lower-scoring hits.
-    """
-    if df is None or len(df) == 0:
-        return df
-
-    df = df.copy()
+def deduplicate_domains(df: pl.DataFrame, gap_threshold=10, max_overlap=5, per_database=False) -> pl.DataFrame:
+    """Deduplicate domain hits in Polars (no pandas)."""
+    if df is None or df.is_empty():
+        return pl.DataFrame()
 
     if "bit_score*alignment_length" not in df.columns and {"bit_score", "alignment_length"}.issubset(df.columns):
-        df["bit_score*alignment_length"] = df["bit_score"] * df["alignment_length"]
-
-    result = []
+        df = df.with_columns((pl.col("bit_score") * pl.col("alignment_length")).alias("bit_score*alignment_length"))
 
     group_cols = ["protein_id", "database"] if not per_database else ["protein_id"]
+    result_rows = []
 
-    for _, group in df.groupby(group_cols):
-        group = group.sort_values(["domain_id_clean", "start"]).copy()
-
-        # Step 1: Merge adjacent fragments
+    for group in df.partition_by(group_cols, as_dict=False, maintain_order=True):
+        g = group.sort(["domain_id_clean", "start"])
         merged_hits = []
         prev = None
-        for _, row in group.iterrows():
+        for row in g.iter_rows(named=True):
             if (
                 prev is not None
                 and str(row.get("domain_id_clean")) == str(prev.get("domain_id_clean"))
@@ -65,15 +57,15 @@ def deduplicate_domains(df, gap_threshold=10, max_overlap=5, per_database=False)
             else:
                 if prev is not None:
                     merged_hits.append(prev)
-                prev = row.copy()
+                prev = dict(row)
         if prev is not None:
             merged_hits.append(prev)
 
-        # Step 2: Remove overlapping hits
-        if "bit_score*alignment_length" in group.columns:
-            merged_hits = sorted(merged_hits, key=lambda x: float(x.get("bit_score*alignment_length", 0) or 0), reverse=True)
-        else:
-            merged_hits = sorted(merged_hits, key=lambda x: float(x.get("bit_score", 0) or 0), reverse=True)
+        merged_hits = sorted(
+            merged_hits,
+            key=lambda x: float(x.get("bit_score*alignment_length", x.get("bit_score", 0)) or 0),
+            reverse=True,
+        )
 
         non_overlapping = []
         occupied = []
@@ -90,15 +82,9 @@ def deduplicate_domains(df, gap_threshold=10, max_overlap=5, per_database=False)
                 non_overlapping.append(row)
                 occupied.append((start, end))
 
-        result.extend(non_overlapping)
+        result_rows.extend(non_overlapping)
 
-    if len(result) == 0:
-        return pd.DataFrame(result)
-    out_df = pd.DataFrame(result)
-    cols = [c for c in df.columns if c in out_df.columns]
-    if cols:
-        out_df = out_df[cols]
-    return out_df
+    return pl.DataFrame(result_rows) if result_rows else pl.DataFrame()
 
 
 def run_domain(all_prots, output, valid_dbs, num_threads,
@@ -110,7 +96,7 @@ def run_domain(all_prots, output, valid_dbs, num_threads,
     """
     Run domain annotation with HMMER using pre-validated MetaCerberus databases.
     """
-    domains_data = pd.DataFrame()
+    domains_data = pl.DataFrame()
     if not valid_dbs:
         return domains_data
 
@@ -145,7 +131,7 @@ def run_domain(all_prots, output, valid_dbs, num_threads,
     if not os.path.exists(fasta_path) or os.path.getsize(fasta_path) == 0:
         console.print(f"[dim]Generating protein sequences file at {fasta_path}...[/dim]")
         try:
-            all_prots[["protein_id", "sequence"]].dropna().drop_duplicates("protein_id").to_fasta("protein_id", "sequence", fasta_path)
+            all_prots[["protein_id", "sequence"]].drop_nulls().drop_duplicates("protein_id").to_fasta("protein_id", "sequence", fasta_path)
             console.print(f"[green]✔ Generated {fasta_path}[/green]")
         except Exception as e:
             console.print(f"[bold yellow]Warning: Could not generate FASTA file: {e}[/bold yellow]")
@@ -196,19 +182,27 @@ def run_domain(all_prots, output, valid_dbs, num_threads,
         console.print("[bold yellow]No domain matches found.[/bold yellow]")
         return domains_data
 
-    domains_df = pd.DataFrame(all_results)
-    domains_df['bit_score*alignment_length'] = domains_df['bit_score'] * domains_df['alignment_length']
-    domains_df = domains_df.sort_values(by=['protein_id', 'bit_score*alignment_length'], ascending=False)
+    domains_df = pl.DataFrame(all_results)
+    # compute composite score and sort (protein asc, score desc)
+    domains_df = domains_df.with_columns(
+        (pl.col('bit_score') * pl.col('alignment_length')).alias('bit_score*alignment_length')
+    ).sort(['protein_id', 'bit_score*alignment_length'], descending=[False, True])
 
     # --- Merge metadata ---
     all_domains_with_metadata = []
     for db, hmm_path, tsv_path in db_files:
-        db_domains = domains_df[domains_df['database'] == db].copy()
-        if db_domains.empty:
+        db_domains = domains_df.filter(pl.col('database') == db)
+        if db_domains.height == 0:
             continue
         try:
-            domain_metadata = pd.read_csv(str(tsv_path), sep="\t")
-            db_domains["domain_id_clean"] = db_domains["domain_id"].str.split(".").str[0]
+            domain_metadata = pl.read_csv(str(tsv_path), separator="\t")
+            db_domains = db_domains.with_columns(
+                pl.col("domain_id")
+                .map_elements(lambda v: v[0] if isinstance(v, (list, tuple)) and len(v) > 0 else v, return_dtype=pl.Utf8)
+                .alias("domain_id_base")
+            ).with_columns(
+                pl.col("domain_id_base").cast(pl.Utf8).str.split(".").list.first().alias("domain_id_clean")
+            )
             id_column = None
             for col in ["ID", "id", "domain_id", "Domain_ID"]:
                 if col in domain_metadata.columns:
@@ -216,8 +210,8 @@ def run_domain(all_prots, output, valid_dbs, num_threads,
                     break
             if id_column:
                 metadata_columns = {col: f"{col}_{db}" for col in domain_metadata.columns if col != id_column}
-                domain_metadata = domain_metadata.rename(columns=metadata_columns)
-                merged = db_domains.merge(domain_metadata, left_on="domain_id_clean", right_on=id_column, how="left")
+                domain_metadata = domain_metadata.rename(metadata_columns)
+                merged = db_domains.join(domain_metadata, left_on="domain_id_clean", right_on=id_column, how="left")
                 all_domains_with_metadata.append(merged)
             else:
                 console.print(f"[bold yellow]Warning: Could not find ID column in metadata for {db}. Using domains without metadata.[/bold yellow]")
@@ -227,13 +221,21 @@ def run_domain(all_prots, output, valid_dbs, num_threads,
             all_domains_with_metadata.append(db_domains)
 
     if all_domains_with_metadata:
-        domains_data = pd.concat(all_domains_with_metadata, ignore_index=True)
-        if deduplicate and not domains_data.empty:
-            before = len(domains_data)
+        domains_data = pl.concat(all_domains_with_metadata, how="vertical")
+        if deduplicate and domains_data.height > 0:
+            before = domains_data.height
             if "domain_id_clean" not in domains_data.columns:
-                domains_data["domain_id_clean"] = domains_data["domain_id"].astype(str).str.split(".").str[0]
+                domains_data = domains_data.with_columns(
+                    pl.col("domain_id")
+                    .map_elements(lambda v: v[0] if isinstance(v, (list, tuple)) and len(v) > 0 else v, return_dtype=pl.Utf8)
+                    .alias("domain_id_base")
+                ).with_columns(
+                    pl.col("domain_id_base").cast(pl.Utf8).str.split(".").list.first().alias("domain_id_clean")
+                )
             if "bit_score*alignment_length" not in domains_data.columns and {"bit_score","alignment_length"}.issubset(domains_data.columns):
-                domains_data["bit_score*alignment_length"] = domains_data["bit_score"] * domains_data["alignment_length"]
+                domains_data = domains_data.with_columns(
+                    (pl.col("bit_score") * pl.col("alignment_length")).alias("bit_score*alignment_length")
+                )
 
             domains_data = deduplicate_domains(
                 domains_data,

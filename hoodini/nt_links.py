@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
+import polars as pl
 
 from hoodini.utils.logging_utils import console
 
@@ -37,7 +37,7 @@ def _resolve_path(name: str, output_dir: Path) -> Path:
     raise FileNotFoundError(f"Could not resolve path for genome identifier '{name}'")
 
 
-def run_nt_links(pairwise_ani: pd.DataFrame, output_dir: str, all_neigh: Optional[pd.DataFrame] = None, threads: int = 8, evalue: Optional[float] = None, keep_temp: bool = False) -> pd.DataFrame:
+def run_nt_links(pairwise_ani: pl.DataFrame, output_dir: str, all_neigh: Optional[pl.DataFrame] = None, threads: int = 8, evalue: Optional[float] = None, keep_temp: bool = False) -> pl.DataFrame:
     """Generate pairwise nucleotide visual blocks using fastANI --visualize.
 
     This function expects a skani-like DataFrame with columns 'Ref_name' and 'Query_name'.
@@ -87,9 +87,9 @@ def run_nt_links(pairwise_ani: pd.DataFrame, output_dir: str, all_neigh: Optiona
     if _in_jupyter():
         try:
             from tqdm.notebook import tqdm
-            iterator = tqdm(df.itertuples(index=False), total=total)
+            iterator = tqdm(df.itertuples(include_header=False), total=total)
         except Exception:
-            iterator = df.itertuples(index=False)
+            iterator = df.itertuples(include_header=False)
     else:
         try:
             from rich.progress import Progress
@@ -97,12 +97,12 @@ def run_nt_links(pairwise_ani: pd.DataFrame, output_dir: str, all_neigh: Optiona
             task = progress.add_task("fastANI visualize", total=total)
             progress.start()
             def iterator_gen():
-                for r in df.itertuples(index=False):
+                for r in df.itertuples(include_header=False):
                     yield r
                     progress.advance(task)
             iterator = iterator_gen()
         except Exception:
-            iterator = df.itertuples(index=False)
+            iterator = df.itertuples(include_header=False)
 
     for row in iterator:
         try:
@@ -187,8 +187,8 @@ def run_nt_links(pairwise_ani: pd.DataFrame, output_dir: str, all_neigh: Optiona
 
         # parse the .visual file
         try:
-            parsed = pd.read_csv(
-                visual_file, sep='\t', header=None,
+            parsed = pl.read_csv(
+                visual_file, separator='\t', header=None,
                 names=[
                     'query', 'ref', 'ani',
                     'na1', 'na2', 'na3',
@@ -206,26 +206,26 @@ def run_nt_links(pairwise_ani: pd.DataFrame, output_dir: str, all_neigh: Optiona
         parsed = parsed[["query", "ref", "ani", "query_start", "query_end", "ref_start", "ref_end"]]
 
         # remove directory path from query/ref names (keep basename only)
-        parsed['query'] = parsed['query'].apply(lambda s: Path(str(s)).name if pd.notna(s) else s)
-        parsed['ref'] = parsed['ref'].apply(lambda s: Path(str(s)).name if pd.notna(s) else s)
+        parsed['query'] = parsed['query'].apply(lambda s: Path(str(s)).name if pl.notna(s) else s)
+        parsed['ref'] = parsed['ref'].apply(lambda s: Path(str(s)).name if pl.notna(s) else s)
 
         # If neighborhood table provided, correct coordinates (they are relative to window)
         # similar to run_ncrna: add the start_win offset to query/ref coordinates
-        if all_neigh is not None and not all_neigh.empty:
+        if all_neigh is not None and all_neigh.height > 0:
             # build a mapping from possible identifiers to start_win and seqid
             start_map = {}
             id_map = {}
-            for _, nr in all_neigh.iterrows():
+            for nr in all_neigh.iter_rows(named=True):
                 # prefer temp_seqid if present, fallback to seqid
                 temp = None
-                if 'temp_seqid' in nr and pd.notna(nr.get('temp_seqid')):
+                if 'temp_seqid' in nr and pl.notna(nr.get('temp_seqid')):
                     temp = str(nr.get('temp_seqid'))
-                if 'seqid' in nr and pd.notna(nr.get('seqid')):
+                if 'seqid' in nr and pl.notna(nr.get('seqid')):
                     seqid = str(nr.get('seqid'))
                 else:
                     seqid = temp
 
-                start_win = int(nr.get('start_win')) if 'start_win' in nr and pd.notna(nr.get('start_win')) else 0
+                start_win = int(nr.get('start_win')) if 'start_win' in nr and pl.notna(nr.get('start_win')) else 0
 
                 # register multiple keys: full, basename, stem
                 for key in set([temp, seqid]):
@@ -240,14 +240,14 @@ def run_nt_links(pairwise_ani: pd.DataFrame, output_dir: str, all_neigh: Optiona
                     id_map[Path(key).stem] = seqid
 
             def _find_offset(name: str) -> int:
-                if pd.isna(name):
+                if name is None:
                     return 0
                 name = str(name)
                 # try direct match then basename then stem
                 return start_map.get(name) or start_map.get(Path(name).name) or start_map.get(Path(name).stem) or 0
 
             def _map_to_seqid(name: str) -> str:
-                if pd.isna(name):
+                if name is None:
                     return name
                 name = str(name)
                 return id_map.get(name) or id_map.get(Path(name).name) or id_map.get(Path(name).stem) or name
@@ -266,13 +266,13 @@ def run_nt_links(pairwise_ani: pd.DataFrame, output_dir: str, all_neigh: Optiona
             parsed['ref'] = parsed['ref'].apply(_map_to_seqid)
 
             # drop helper offsets
-            parsed = parsed.drop(columns=['q_offset', 'r_offset'])
+            parsed = parsed.drop(['q_offset', 'r_offset'])
 
         visual_rows.append(parsed)
 
     if visual_rows:
-        visual_df = pd.concat(visual_rows, ignore_index=True)
+        visual_df = pl.concat(visual_rows, how="vertical")
     else:
-        visual_df = pd.DataFrame(columns=["query", "ref", "ani", "query_start", "query_end", "ref_start", "ref_end"])
+        visual_df = pl.DataFrame(columns=["query", "ref", "ani", "query_start", "query_end", "ref_start", "ref_end"])
 
     return visual_df

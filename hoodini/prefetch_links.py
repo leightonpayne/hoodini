@@ -17,7 +17,7 @@ import base64
 import zlib
 from typing import Iterable, List, Optional
 
-import pandas as pd
+import polars as pl
 import requests
 from importlib.resources import files
 
@@ -119,12 +119,13 @@ def _load_local_assembly_map() -> dict:
         if not path.exists():
             _LOCAL_ASM_MAP = {}
             return _LOCAL_ASM_MAP
-        # Read minimal columns to reduce memory
-        df = pd.read_parquet(path, columns=["assembly_accession", "ftp_path"])  # type: ignore[arg-type]
-        # Normalize strings and map
-        asm = df["assembly_accession"].astype(str).tolist()
-        ftp = df["ftp_path"].astype(str).tolist()
-        _LOCAL_ASM_MAP = {a: f for a, f in zip(asm, ftp)}
+        # Read minimal columns to reduce memory using Polars
+        df = pl.read_parquet(path, columns=["assembly_accession", "ftp_path"])
+        # Convert to dictionary
+        _LOCAL_ASM_MAP = dict(zip(
+            df["assembly_accession"].cast(pl.Utf8).to_list(),
+            df["ftp_path"].cast(pl.Utf8).to_list()
+        ))
         return _LOCAL_ASM_MAP
     except Exception:
         _LOCAL_ASM_MAP = {}
@@ -182,7 +183,7 @@ def get_prefetched_link_table(
     kinds: List[str] | None = None,
     *,
     seqrep_only: bool = False,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Return a DataFrame with columns: assembly_id, filetype, link
 
     If ``seqrep_only`` is True, only sequence_report links are generated and
@@ -212,7 +213,7 @@ def get_prefetched_link_table(
                     print(f"warning skipped {asm} sequence_report: {e}")
                 continue
             rows.append({"assembly_id": asm, "filetype": "sequence_report", "url": link})
-        return pd.DataFrame(rows)
+        return pl.DataFrame(rows)
 
     sess = requests.Session()
     for asm in asm_id_list:
@@ -233,7 +234,7 @@ def get_prefetched_link_table(
                 continue
             rows.append({"assembly_id": asm, "filetype": k, "url": link})
 
-    return pd.DataFrame(rows)
+    return pl.DataFrame(rows)
 
 
 def _cli():
@@ -252,9 +253,9 @@ def _cli():
     kinds = [x.strip() for x in args.kinds.split(",") if x.strip()]
     df = get_prefetched_link_table(accs, kinds=kinds)
     if args.output:
-        df.to_csv(args.output, sep="\t", index=False, columns=["assembly_id", "filetype", ""], header=True)
+        df.write_csv(args.output, separator="\t", include_header=False, columns=["assembly_id", "filetype", ""], header=True)
     else:
-        print(df.to_csv(sep="\t", index=False, columns=["assembly_id", "filetype", "url"], header=True).rstrip())
+        print(df.write_csv(separator="\t", include_header=False, columns=["assembly_id", "filetype", "url"], header=True).rstrip())
 
 
 if __name__ == "__main__":

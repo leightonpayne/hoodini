@@ -1,15 +1,16 @@
 import sys
 import shutil
-import asyncio
 import datetime
 from pathlib import Path
 from typing import Optional, Union
 from importlib.resources import files
 
-import pandas as pd
+import polars as pl
 from rich.prompt import Prompt
 from rich.console import Console
 
+from hoodini.models.schemas import RECORDS
+from hoodini.utils.polars_adapters import to_polars
 from hoodini.utils.core import read_input_list, read_input_sheet, uniprot2ncbi
 from hoodini.download.assembly_summary import download_assembly_db
 
@@ -22,15 +23,15 @@ def initialize_inputs(
     inputsheet: Optional[Union[Path, str]] = None,
     output: Optional[Union[Path, str]] = None,
     force: bool = False,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
-    Initialize the working directory and read the user’s input records.
+    Initialize the working directory and read the user’s input records (Polars).
 
     1. Creates or (if existing) optionally overwrites the output folder.
     2. Reads either a single‐column input list or a TSV “inputsheet”.
     3. Converts UniProt IDs to NCBI IDs via `uniprot2ncbi(...)`.
     4. Drops duplicate records based on “og_index”.
-    5. Returns a pandas.DataFrame of final, deduplicated records.
+    5. Returns a Polars DataFrame of final, deduplicated records.
     """
     check_assembly_db()
 
@@ -63,23 +64,28 @@ def initialize_inputs(
 
     # Step 3: Read input records
     if inputsheet:
-        records = read_input_sheet(inputsheet)
+        records_raw = read_input_sheet(inputsheet)
     elif input_path:
-        records = read_input_list(input_path)
+        records_raw = read_input_list(input_path)
     else:
         console.print("[bold red]Error:[/bold red] No input_path or inputsheet provided.")
         sys.exit(1)
 
-    # Step 4: Convert UniProt → NCBI, drop duplicates
-    records = uniprot2ncbi(records)
-    records = records.drop_duplicates(subset=["og_index"], keep="first")
+    # Step 4: Convert UniProt → NCBI, drop duplicates (Polars)
+    records_pd = uniprot2ncbi(records_raw)
+    records = to_polars(records_pd, schema=RECORDS)
+
+    records = records.unique(subset=["og_index"], keep="first")
 
     # Set premade=True for rows that have (gff_path and faa_path) or (gbf_path)
-    premade_mask = (
-        (records['gff_path'].notnull() & records['faa_path'].notnull()) |
-        (records['gbf_path'].notnull())
+    records = records.with_columns(
+        (
+            (
+                pl.col("gff_path").is_not_null() & pl.col("faa_path").is_not_null()
+            )
+            | (pl.col("gbf_path").is_not_null())
+        ).alias("premade")
     )
-    records.loc[premade_mask, 'premade'] = True
 
     return records
 

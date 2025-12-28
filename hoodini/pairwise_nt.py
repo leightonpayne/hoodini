@@ -4,13 +4,19 @@ from pathlib import Path
 import math
 from collections import Counter
 from typing import Optional, Tuple
-import mappy as mp  # noqa
-
-
-import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import polars as pl
+import mappy as mp  # noqa
+
 from hoodini.utils.logging_utils import console
+
+
+def _is_na(x):
+    try:
+        return x is None or (isinstance(x, float) and math.isnan(x))
+    except Exception:
+        return x is None
 
 def _fasta_ids(fasta_path: str):
     from Bio import SeqIO
@@ -32,43 +38,36 @@ def _fasta_lengths(path: str):
         idx.close()
 
 
-def _write_intergenic_fasta(all_gff, fasta_path: str, out_fasta: str, all_neigh: Optional[pd.DataFrame] = None):
+def _write_intergenic_fasta(all_gff, fasta_path: str, out_fasta: str, all_neigh: Optional[pl.DataFrame] = None):
     """
     Create a FASTA of intergenic regions from neighborhoods.fasta using a GFF (path or DataFrame).
-    Returns a DataFrame with columns ['temp_seqid','seqid','start_win'] describing the mapping for each record.
-    The FASTA record ids are created as "{temp_seqid}__inter_{start}_{end}" where start/end are 1-based coordinates
-    relative to the neighborhood sequence.
+    Returns a DataFrame with columns ['temp_seqid','seqid','start_win'].
     """
     from Bio import SeqIO
-    import pandas as pd
 
     # load GFF into DataFrame with columns seqid,type,start,end
     if all_gff is None:
         raise ValueError("all_gff is required for intergenic FASTA generation")
-    if isinstance(all_gff, pd.DataFrame):
-        gff = all_gff.copy()
+    if isinstance(all_gff, pl.DataFrame):
+        gff = all_gff.clone()
     else:
-        # assume path-like
         cols = ['seqid','source','type','start','end','score','strand','phase','attributes']
-        gff = pd.read_csv(str(all_gff), sep='\t', comment='#', header=None, names=cols, low_memory=False)
+        gff = pl.read_csv(str(all_gff), separator='\t', has_header=False, new_columns=cols, comment='#')
 
-    # keep only coding features to exclude
-    coding_types = set(['CDS', 'gene'])
-    gff_coding = gff[gff['type'].isin(coding_types)].copy()
+    coding_types = ['CDS', 'gene']
+    gff_coding = gff.filter(pl.col('type').is_in(coding_types))
 
-    # build mapping from fasta header -> canonical seqid and start_win (if available)
     temp_to_seqid = {}
     start_map_init = {}
-    if all_neigh is not None and not all_neigh.empty:
-        for _, nr in all_neigh.iterrows():
-            temp = str(nr['temp_seqid']) if 'temp_seqid' in nr and pd.notna(nr['temp_seqid']) else None
-            seqid = str(nr['seqid']) if 'seqid' in nr and pd.notna(nr['seqid']) else temp
+    if all_neigh is not None and all_neigh.height > 0:
+        for nr in all_neigh.iter_rows(named=True):
+            temp = str(nr.get('temp_seqid')) if ('temp_seqid' in all_neigh.columns and nr.get('temp_seqid') is not None) else None
+            seqid = str(nr.get('seqid')) if ('seqid' in all_neigh.columns and nr.get('seqid') is not None) else temp
             if temp:
                 temp_to_seqid[temp] = seqid
-            if seqid and 'start_win' in nr and pd.notna(nr['start_win']):
-                start_map_init[seqid] = int(nr['start_win'])
+            if seqid and 'start_win' in nr and nr.get('start_win') is not None:
+                start_map_init[seqid] = int(nr.get('start_win'))
 
-    out_records = []
     meta_rows = []
     with open(out_fasta, 'w') as outfh:
         for rec in SeqIO.parse(str(fasta_path), 'fasta'):
@@ -77,41 +76,34 @@ def _write_intergenic_fasta(all_gff, fasta_path: str, out_fasta: str, all_neigh:
             seqlen = len(seq)
             canonical = temp_to_seqid.get(hdr, hdr)
 
-            # get coding intervals for this canonical id (try exact and name/stem matches)
-            cand = gff_coding[gff_coding['seqid'].isin([canonical, Path(canonical).name, Path(canonical).stem])]
+            cand = gff_coding.filter(pl.col('seqid').is_in([canonical, Path(canonical).name, Path(canonical).stem]))
             coding_intervals = []
 
-            # determine start_win (global start of this neighborhood) if provided
             start_win = start_map_init.get(canonical, None)
             if start_win is not None:
-                # GFF coords are genome/global coords -> convert to local by subtracting start_win
-                for _, r in cand.iterrows():
+                for r in cand.iter_rows(named=True):
                     try:
-                        s_global = int(r['start']); e_global = int(r['end'])
+                        s_global = int(r.get('start')); e_global = int(r.get('end'))
                     except Exception:
                         continue
                     s = s_global - int(start_win) + 1
                     e = e_global - int(start_win) + 1
-                    # clamp to sequence length
                     s = max(1, min(s, seqlen))
                     e = max(1, min(e, seqlen))
                     if e >= s:
                         coding_intervals.append((s, e))
             else:
-                # fallback: assume GFF coords are already relative to the neighborhood
                 console.log(f"Warning: no start_win for {canonical}; treating GFF coords as neighborhood-local")
-                for _, r in cand.iterrows():
+                for r in cand.iter_rows(named=True):
                     try:
-                        s = int(r['start']); e = int(r['end'])
+                        s = int(r.get('start')); e = int(r.get('end'))
                     except Exception:
                         continue
-                    # clamp
                     s = max(1, min(s, seqlen))
                     e = max(1, min(e, seqlen))
                     if e >= s:
                         coding_intervals.append((s, e))
 
-            # merge coding intervals
             coding_intervals.sort()
             merged = []
             for iv in coding_intervals:
@@ -123,7 +115,6 @@ def _write_intergenic_fasta(all_gff, fasta_path: str, out_fasta: str, all_neigh:
                     else:
                         merged.append([iv[0], iv[1]])
 
-            # compute complement (intergenic) intervals
             intergenic = []
             pos = 1
             for s, e in merged:
@@ -132,33 +123,25 @@ def _write_intergenic_fasta(all_gff, fasta_path: str, out_fasta: str, all_neigh:
                 pos = e + 1
             if pos <= seqlen:
                 intergenic.append((pos, seqlen))
-
-            # if no coding intervals, whole sequence is intergenic
             if not merged:
                 intergenic = [(1, seqlen)]
 
-            # write intergenic sequences
             for s, e in intergenic:
                 if e < s:
                     continue
                 sub = seq[s-1:e]
                 temp_id = f"{hdr}__inter_{s}_{e}"
                 outfh.write(f">{temp_id}\n")
-                # wrap at 80
                 for i in range(0, len(sub), 80):
                     outfh.write(sub[i:i+80] + "\n")
+                start_win_val = start_map_init.get(canonical, 0)
+                meta_rows.append({'temp_seqid': temp_id, 'seqid': canonical, 'start_win': int(s) + int(start_win_val) - 1})
 
-                # record mapping: temp_seqid -> canonical seqid and start (global within neighborhood)
-                start_win = start_map_init.get(canonical, 0)
-                meta_rows.append({'temp_seqid': temp_id, 'seqid': canonical, 'start_win': int(s) + int(start_win) - 1})
-
-    meta_df = pd.DataFrame(meta_rows, columns=['temp_seqid','seqid','start_win'])
-    return meta_df
+    return pl.DataFrame(meta_rows, columns=['temp_seqid','seqid','start_win'])
 
 
-def _skani_like_from_blast(hits_df: pd.DataFrame, seq_lengths: dict,
-                           round_digits=3, overlap_on="query", overlap_tol=0) -> pd.DataFrame:
-    import math
+def _skani_like_from_blast(hits_df: pl.DataFrame, seq_lengths: dict,
+                           round_digits=3, overlap_on="query", overlap_tol=0) -> pl.DataFrame:
     def _norm_iv(a, b):
         a = int(a); b = int(b)
         lo, hi = (a - 1, b) if a <= b else (b - 1, a)
@@ -200,32 +183,53 @@ def _skani_like_from_blast(hits_df: pd.DataFrame, seq_lengths: dict,
                 selected.append(i); ivs.append(iv)
         return selected
 
-    if hits_df.empty:
-        return pd.DataFrame(columns=["Ref_name", "Query_name", "ANI", "Align_fraction_ref", "Align_fraction_query"])
+    if hits_df.height == 0:
+        return pl.DataFrame({
+            "Ref_name": [], "Query_name": [], "ANI": [],
+            "Align_fraction_ref": [], "Align_fraction_query": []
+        })
 
-    df = hits_df.copy()
-    for c in ["pident", "length", "qstart", "qend", "sstart", "send", "bitscore", "qlen", "slen"]:
+    df = hits_df.clone()
+    float_cols = ["pident", "bitscore"]
+    int_cols = ["length", "qstart", "qend", "sstart", "send", "qlen", "slen"]
+    cast_exprs = []
+    for c in float_cols:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+            cast_exprs.append(pl.col(c).cast(pl.Float64))
+    for c in int_cols:
+        if c in df.columns:
+            cast_exprs.append(pl.col(c).cast(pl.Int64))
+    if cast_exprs:
+        df = df.with_columns(cast_exprs)
 
+    pairs = df.select(["qseqid", "sseqid"]).unique()
     out = []
-    for (q_id, t_id), g in df.groupby(["qseqid", "sseqid"], sort=False):
-        hits = g.to_dict("records")
+    for q_id, t_id in pairs.iter_rows():
+        g = df.filter((pl.col("qseqid") == q_id) & (pl.col("sseqid") == t_id))
+        hits = [r for r in g.iter_rows(named=True)]
         sel_idx = _select_non_overlapping_blast(hits, on=overlap_on, tol=overlap_tol)
         sel = [hits[i] for i in sel_idx]
 
-        sum_blen = sum(int(h["length"]) for h in sel if pd.notna(h.get("length")))
+        sum_blen = sum(int(h["length"]) for h in sel if not _is_na(h.get("length")))
         sum_mlen = sum(int(round((h["pident"]/100.0) * h["length"])) for h in sel
-                       if pd.notna(h.get("pident")) and pd.notna(h.get("length")))
+                       if not _is_na(h.get("pident")) and not _is_na(h.get("length")))
         ani = (100.0 * sum_mlen / sum_blen) if sum_blen > 0 else float('nan')
 
-        q_ivs = [_norm_iv(h["qstart"], h["qend"]) for h in sel if pd.notna(h.get("qstart")) and pd.notna(h.get("qend"))]
-        t_ivs = [_norm_iv(h["sstart"], h["send"]) for h in sel if pd.notna(h.get("sstart")) and pd.notna(h.get("send"))]
+        q_ivs = [_norm_iv(h["qstart"], h["qend"]) for h in sel if not _is_na(h.get("qstart")) and not _is_na(h.get("qend"))]
+        t_ivs = [_norm_iv(h["sstart"], h["send"]) for h in sel if not _is_na(h.get("sstart")) and not _is_na(h.get("send"))]
         covered_q = _merge_coverage_len(q_ivs)
         covered_t = _merge_coverage_len(t_ivs)
 
-        q_len = g["qlen"].iloc[0] if "qlen" in g.columns and pd.notna(g["qlen"].iloc[0]) else seq_lengths.get(q_id)
-        t_len = g["slen"].iloc[0] if "slen" in g.columns and pd.notna(g["slen"].iloc[0]) else seq_lengths.get(t_id)
+        def _first(df_grp: pl.DataFrame, col: str):
+            if col not in df_grp.columns or df_grp.height == 0:
+                return None
+            try:
+                return df_grp.select(pl.first(col)).to_series().to_list()[0]
+            except Exception:
+                return None
+
+        q_len = _first(g, "qlen") or seq_lengths.get(q_id)
+        t_len = _first(g, "slen") or seq_lengths.get(t_id)
 
         frac_q = (covered_q / q_len) * 100 if q_len else float('nan')
         frac_t = (covered_t / t_len) * 100 if t_len else float('nan')
@@ -238,7 +242,7 @@ def _skani_like_from_blast(hits_df: pd.DataFrame, seq_lengths: dict,
             "Align_fraction_query": None if math.isnan(frac_q) else round(frac_q, round_digits),
         })
 
-    return pd.DataFrame(out, columns=["Ref_name", "Query_name", "ANI", "Align_fraction_ref", "Align_fraction_query"])
+    return pl.DataFrame(out)
 
 
 def _run_mappy_target_block(args):
@@ -291,36 +295,38 @@ def _run_mappy_target_block(args):
     finally:
         idx.close()
 
-def _skani_like_from_mappy(hits_df: pd.DataFrame, fasta_path: str,
+
+def _skani_like_from_mappy(hits_df: pl.DataFrame, fasta_path: str,
                            round_digits: int = 3,
                            overlap_on: str = "query",
                            overlap_tol: int = 0,
                            require_primary: bool = True,
-                           return_percent: bool = True) -> pd.DataFrame:
-    """
-    Columns out: Ref_name, Query_name, ANI, Align_fraction_ref, Align_fraction_query
-    ANI = 100 * sum(mlen) / sum(blen) over non-overlapping HSP subset.
-    Fractions in percent when return_percent=True.
-    """
-    if hits_df.empty:
-        return pd.DataFrame(columns=["Ref_name","Query_name","ANI",
+                           return_percent: bool = True) -> pl.DataFrame:
+    if hits_df.height == 0:
+        return pl.DataFrame(columns=["Ref_name","Query_name","ANI",
                                      "Align_fraction_ref","Align_fraction_query"])
 
-    df = hits_df.copy()
+    df = hits_df.clone()
     need = ["query_id","target_id","q_st","q_en","r_st","r_en",
             "mlen","blen","mapq","is_primary","NM"]
+    add_exprs = []
     for c in need:
         if c not in df.columns:
-            df[c] = None
-    for c in ["q_st","q_en","r_st","r_en","mlen","blen","mapq","NM"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+            add_exprs.append(pl.lit(None).alias(c))
+    if add_exprs:
+        df = df.with_columns(add_exprs)
+    df = df.with_columns([
+        pl.col("q_st").cast(pl.Int64), pl.col("q_en").cast(pl.Int64),
+        pl.col("r_st").cast(pl.Int64), pl.col("r_en").cast(pl.Int64),
+        pl.col("mlen").cast(pl.Int64), pl.col("blen").cast(pl.Int64),
+        pl.col("mapq").cast(pl.Int64), pl.col("NM").cast(pl.Int64),
+    ])
 
     if require_primary and "is_primary" in df.columns:
-        df = df[df["is_primary"].fillna(True)]
+        df = df.filter(pl.col("is_primary").fill_null(True))
 
     lengths = _fasta_lengths(fasta_path)
 
-    # helpers
     def _norm_iv(a, b):
         a = int(a); b = int(b)
         return (a, b) if a <= b else (b, a)
@@ -365,20 +371,20 @@ def _skani_like_from_mappy(hits_df: pd.DataFrame, fasta_path: str,
         sum_blen, sum_mlen = 0, 0
         for h in sel:
             bl = h.get("blen")
-            if pd.isna(bl) or bl is None:
+            if _is_na(bl) or bl is None:
                 qlen = (h.get("q_en") - h.get("q_st")) if (h.get("q_en") is not None and h.get("q_st") is not None) else None
                 rlen = (h.get("r_en") - h.get("r_st")) if (h.get("r_en") is not None and h.get("r_st") is not None) else None
                 bl = qlen if (qlen is not None) else rlen
             ml = h.get("mlen")
-            if (pd.isna(ml) or ml is None) and bl is not None and h.get("NM") is not None:
+            if (_is_na(ml) or ml is None) and bl is not None and h.get("NM") is not None:
                 ml = max(0, int(bl) - int(h.get("NM")))
             if bl is not None: sum_blen += int(bl)
             if ml is not None: sum_mlen += int(ml)
 
         ani = (100.0 * sum_mlen / sum_blen) if sum_blen > 0 else float("nan")
 
-        q_ivs = [_norm_iv(h["q_st"], h["q_en"]) for h in sel if pd.notna(h.get("q_st")) and pd.notna(h.get("q_en"))]
-        t_ivs = [_norm_iv(h["r_st"], h["r_en"]) for h in sel if pd.notna(h.get("r_st")) and pd.notna(h.get("r_en"))]
+        q_ivs = [_norm_iv(h["q_st"], h["q_en"]) for h in sel if pl.notna(h.get("q_st")) and pl.notna(h.get("q_en"))]
+        t_ivs = [_norm_iv(h["r_st"], h["r_en"]) for h in sel if pl.notna(h.get("r_st")) and pl.notna(h.get("r_en"))]
         covered_q = _merge_coverage_len(q_ivs)
         covered_t = _merge_coverage_len(t_ivs)
 
@@ -396,11 +402,11 @@ def _skani_like_from_mappy(hits_df: pd.DataFrame, fasta_path: str,
             "Align_fraction_query": None if math.isnan(frac_q) else round(frac_q, round_digits),
         })
 
-    return pd.DataFrame(out, columns=["Ref_name","Query_name","ANI",
+    return pl.DataFrame(out, columns=["Ref_name","Query_name","ANI",
                                       "Align_fraction_ref","Align_fraction_query"])
 
 
-def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
+def run_pairwise_nt(all_neigh: Optional[pl.DataFrame],
                 all_gff: Optional[object] = None,
                 output_dir: str = "pairwise_nt_out",
                 nt_aln_mode: Optional[object] = None,
@@ -419,33 +425,31 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                 mm2_preset: str = "asm20",
                 mm2_min_mapq: int = 0,
                 mm2_threads_per_worker: int = 1,
-               ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+               ) -> Tuple[pl.DataFrame, pl.DataFrame]:
     """
     Run pairwise nucleotide comparisons from a single FASTA and return (skani_like_df, alignment_rows_df).
-
-    alignment_rows_df columns: [query, query_start, query_end, ref, ref_start, ref_end, ani]
-    ani for blastn = pident; for fastani this will be filled from ANI table; for mappy we use pid.
     """
-    def _map_and_write_pairwise_ani_uid(df: pd.DataFrame, mode_suffix: Optional[str] = None):
-        if df is None or df.empty:
+    def _map_and_write_pairwise_ani_uid(df: pl.DataFrame, mode_suffix: Optional[str] = None):
+        if df is None or df.height == 0:
             return None
-        if all_neigh is None or all_neigh.empty:
+        if all_neigh is None or all_neigh.height == 0:
             return None
 
-        # build maps: temp_seqid -> unique_id, and seqid -> unique_id only when unambiguous
         temp_map = {}
         if 'temp_seqid' in all_neigh.columns and 'unique_id' in all_neigh.columns:
-            temp_map = dict(zip(all_neigh['temp_seqid'].astype(str), all_neigh['unique_id']))
+            for r in all_neigh.select([pl.col('temp_seqid').cast(pl.Utf8), 'unique_id']).drop_nulls().iter_rows():
+                temp_map[str(r[0])] = r[1]
 
         seq_map = {}
         if 'seqid' in all_neigh.columns and 'unique_id' in all_neigh.columns:
-            seq_counts = all_neigh.groupby('seqid')['unique_id'].nunique()
-            good_seqids = set(seq_counts[seq_counts == 1].index)
+            seq_counts = all_neigh.group_by('seqid').agg(pl.col('unique_id').n_unique().alias('n')).filter(pl.col('n') == 1)
+            good_seqids = set(seq_counts.select('seqid').to_series().to_list())
             if good_seqids:
-                seq_map = dict(all_neigh[all_neigh['seqid'].isin(good_seqids)].set_index('seqid')['unique_id'])
+                for r in all_neigh.filter(pl.col('seqid').is_in(list(good_seqids))).select(['seqid','unique_id']).iter_rows():
+                    seq_map[str(r[0])] = r[1]
 
         def _map_name_to_uid(name):
-            if pd.isna(name):
+            if _is_na(name):
                 return None
             s = str(name)
             if s in temp_map:
@@ -454,205 +458,148 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                 return seq_map[s]
             return None
 
-        dfc = df.copy()
-        # ensure expected columns exist
+        dfc = df.clone()
         if 'Ref_name' not in dfc.columns or 'Query_name' not in dfc.columns:
             return None
 
-        dfc['ref_uid'] = dfc['Ref_name'].map(_map_name_to_uid)
-        dfc['qry_uid'] = dfc['Query_name'].map(_map_name_to_uid)
-
-        mapped = dfc.dropna(subset=['ref_uid', 'qry_uid']).copy()
-        if mapped.empty:
+        dfc = dfc.with_columns([
+            pl.col('Ref_name').map_elements(_map_name_to_uid).alias('ref_uid'),
+            pl.col('Query_name').map_elements(_map_name_to_uid).alias('qry_uid'),
+        ]).drop_nulls(subset=['ref_uid','qry_uid'])
+        if dfc.height == 0:
             return None
 
-        # unordered pair and aggregate
-        mapped['A'] = mapped[['ref_uid', 'qry_uid']].min(axis=1)
-        mapped['B'] = mapped[['ref_uid', 'qry_uid']].max(axis=1)
+        dfc = dfc.with_columns([
+            pl.min_horizontal(['ref_uid','qry_uid']).alias('A'),
+            pl.max_horizontal(['ref_uid','qry_uid']).alias('B'),
+        ])
 
-        agg = mapped.groupby(['A', 'B']).agg({
-            'ANI': 'mean',
-            'Align_fraction_ref': 'mean',
-            'Align_fraction_query': 'mean'
-        }).reset_index()
+        agg = dfc.group_by(['A','B']).agg([
+            pl.col('ANI').mean().alias('ANI'),
+            pl.col('Align_fraction_ref').mean().alias('Align_fraction_ref'),
+            pl.col('Align_fraction_query').mean().alias('Align_fraction_query'),
+        ])
 
-        # write output
         if write_outputs:
             suf = mode_suffix or str(nt_aln_mode)
             out_path = out / f'pairwise_ani_uid_{suf}.tsv'
             try:
-                agg.to_csv(out_path, sep='\t', index=False)
+                agg.write_csv(out_path, separator='\t', include_header=False)
             except Exception:
-                # best-effort write; ignore failures here
                 pass
 
         return agg
-    
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     threads = threads or max(1, os.cpu_count() or 1)
 
-    # ensure neighborhoods.fasta exists
     nb_dir = out / 'neighborhood'
     nb_dir.mkdir(parents=True, exist_ok=True)
     fasta_path = nb_dir / 'neighborhoods.fasta'
     if not fasta_path.exists():
-        if all_neigh is None or all_neigh.empty:
+        if all_neigh is None or all_neigh.height == 0:
             raise FileNotFoundError(f"neighborhood FASTA not found at {fasta_path} and no `all_neigh` provided")
         from hoodini.utils.core import to_fasta
         if 'temp_seqid' in all_neigh.columns and 'sequence' in all_neigh.columns:
-            df_for_fasta = all_neigh[['temp_seqid', 'sequence']].dropna().drop_duplicates(subset=['temp_seqid'])
+            df_for_fasta = all_neigh[['temp_seqid', 'sequence']].drop_nulls().unique(subset=['temp_seqid'])
             df_for_fasta.to_fasta('temp_seqid', 'sequence', str(fasta_path))
         elif 'seqid' in all_neigh.columns and 'sequence' in all_neigh.columns:
-            df_for_fasta = all_neigh[['seqid', 'sequence']].dropna().drop_duplicates(subset=['seqid'])
+            df_for_fasta = all_neigh[['seqid', 'sequence']].drop_nulls().unique(subset=['seqid'])
             df_for_fasta.to_fasta('seqid', 'sequence', str(fasta_path))
 
-    # prepare ids & lengths
     ids = _fasta_ids(str(fasta_path))
     id_pos = {cid: i for i, cid in enumerate(ids)}
     seq_lengths = _fasta_lengths(str(fasta_path))
 
-    # SKANI BRANCH
     if ani_mode is not None and str(ani_mode).lower() == 'skani':
-        import io
         console.log(f"Running skani triangle on {fasta_path}")
-        cmd = [
-            'skani', 'triangle',
-            '-i', str(fasta_path),
-            '-E', '--small-genomes',
-            '-t', str(threads)
-        ]
+        cmd = ['skani', 'triangle', '-i', str(fasta_path), '-E', '--small-genomes', '-t', str(threads)]
         console.print(f"Running: {' '.join(cmd)}")
         skani_log = out / 'skani_triangle.log'
         with open(skani_log, 'w') as logfh:
             subprocess.run(cmd, check=True, stdout=logfh, stderr=subprocess.DEVNULL, text=True)
-
         try:
-            df = pd.read_csv(skani_log, sep='\t', header=0)
+            df = pl.read_csv(skani_log, separator='\t', has_header=True)
         except Exception:
-            empty_align = pd.DataFrame(columns=["query","query_start","query_end","ref","ref_start","ref_end","ani"])
-            return pd.DataFrame(columns=['Ref_name', 'Query_name', 'ANI', 'Align_fraction_ref', 'Align_fraction_query']), empty_align
+            empty_align = pl.DataFrame(columns=["query","query_start","query_end","ref","ref_start","ref_end","ani"])
+            return pl.DataFrame(columns=['Ref_name', 'Query_name', 'ANI', 'Align_fraction_ref', 'Align_fraction_query']), empty_align
 
-        # Expected columns: Ref_name, Query_name, ANI, Align_fraction_ref, Align_fraction_query
-        # If Align_fraction_query missing, copy from Align_fraction_ref
         if 'Align_fraction_query' not in df.columns and 'Align_fraction_ref' in df.columns:
-            df['Align_fraction_query'] = df['Align_fraction_ref']
-        # Normalize Ref/Query names
+            df = df.with_columns(pl.col('Align_fraction_ref').alias('Align_fraction_query'))
         if 'Ref_name' in df.columns:
-            df['Ref_name'] = df['Ref_name'].apply(lambda x: str(x).split('/')[-1])
+            df = df.with_columns(pl.col('Ref_name').cast(pl.Utf8).str.split('/').list.last().alias('Ref_name'))
         if 'Query_name' in df.columns:
-            df['Query_name'] = df['Query_name'].apply(lambda x: str(x).split('/')[-1])
-        # Ensure numeric conversions
+            df = df.with_columns(pl.col('Query_name').cast(pl.Utf8).str.split('/').list.last().alias('Query_name'))
+        cast_exprs = []
         if 'ANI' in df.columns:
-            df['ANI'] = pd.to_numeric(df['ANI'], errors='coerce')
+            cast_exprs.append(pl.col('ANI').cast(pl.Float64))
         if 'Align_fraction_ref' in df.columns:
-            df['Align_fraction_ref'] = pd.to_numeric(df.get('Align_fraction_ref'), errors='coerce')
+            cast_exprs.append(pl.col('Align_fraction_ref').cast(pl.Float64))
         if 'Align_fraction_query' in df.columns:
-            df['Align_fraction_query'] = pd.to_numeric(df.get('Align_fraction_query'), errors='coerce')
-        # Remove self-hits
+            cast_exprs.append(pl.col('Align_fraction_query').cast(pl.Float64))
+        if cast_exprs:
+            df = df.with_columns(cast_exprs)
         if 'Ref_name' in df.columns and 'Query_name' in df.columns:
-            df = df[df['Ref_name'] != df['Query_name']]
-        # Map to unique_id pairs using all_neigh
+            df = df.filter(pl.col('Ref_name') != pl.col('Query_name'))
         required = ['Ref_name', 'Query_name', 'ANI', 'Align_fraction_ref', 'Align_fraction_query']
-        pairwise_ani = df[required].copy() if all(c in df.columns for c in required) else pd.DataFrame(columns=required)
-        if pairwise_ani is not None and not pairwise_ani.empty and all_neigh is not None and not all_neigh.empty:
-            temp_map = dict(zip(all_neigh['temp_seqid'].astype(str), all_neigh['unique_id'])) if 'temp_seqid' in all_neigh.columns and 'unique_id' in all_neigh.columns else {}
-            seq_counts = all_neigh.groupby('seqid')['unique_id'].nunique() if 'seqid' in all_neigh.columns and 'unique_id' in all_neigh.columns else pd.Series()
-            good_seqids = set(seq_counts[seq_counts == 1].index) if not seq_counts.empty else set()
-            seq_map = dict(all_neigh[all_neigh['seqid'].isin(good_seqids)].set_index('seqid')['unique_id']) if good_seqids else {}
-            def map_name_to_uid(name):
-                if pd.isna(name): return None
-                s = str(name)
-                if s in temp_map: return temp_map[s]
-                if s in seq_map: return seq_map[s]
-                return None
-            pairwise_ani['ref_uid'] = pairwise_ani['Ref_name'].map(map_name_to_uid)
-            pairwise_ani['qry_uid'] = pairwise_ani['Query_name'].map(map_name_to_uid)
-            mapped = pairwise_ani.dropna(subset=['ref_uid', 'qry_uid']).copy()
-            if not mapped.empty:
-                mapped['A'] = mapped[['ref_uid', 'qry_uid']].min(axis=1)
-                mapped['B'] = mapped[['ref_uid', 'qry_uid']].max(axis=1)
-                pairwise_ani_uid = mapped.groupby(['A', 'B']).agg({
-                    'ANI': 'mean',
-                    'Align_fraction_ref': 'mean',
-                    'Align_fraction_query': 'mean'
-                }).reset_index()
-                pairwise_ani = pairwise_ani_uid
-
-        # attempt UID mapping and writing
+        pairwise_ani = df.select(required) if all(c in df.columns for c in required) else pl.DataFrame({c: [] for c in required})
         try:
             agg_uid = _map_and_write_pairwise_ani_uid(pairwise_ani, mode_suffix='skani')
             if agg_uid is not None:
                 pairwise_ani = agg_uid
         except Exception:
             pass
-
-        # skani does not produce alignment rows; return empty nt_links regardless of nt_links
-        empty_align = pd.DataFrame(columns=["query","query_start","query_end","ref","ref_start","ref_end","ani"])
+        empty_align = pl.DataFrame(columns=["query","query_start","query_end","ref","ref_start","ref_end","ani"])
         return pairwise_ani, empty_align
-    
-    # BLASTN BRANCH
-    if nt_aln_mode.lower() == 'blastn' or  str(ani_mode).lower() == 'blastn':
+
+    if nt_aln_mode and nt_aln_mode.lower() in ('blastn', 'blast') or (ani_mode and str(ani_mode).lower() == 'blastn'):
         db_prefix = out / 'db'
         blast_tsv = out / 'allvsall.outfmt6.tsv'
-
         console.log(f"Making BLAST DB at {db_prefix}")
         subprocess.run([
-            "makeblastdb",
-            "-in", fasta_path,
-            "-dbtype", "nucl",
-            "-parse_seqids",
-            "-out", str(db_prefix)
+            "makeblastdb", "-in", fasta_path, "-dbtype", "nucl", "-parse_seqids", "-out", str(db_prefix)
         ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         outfmt = "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen"
-        cmd = [
-            "blastn",
-            "-query", str(fasta_path),
-            "-db", str(db_prefix),
-            "-task", blast_task,
-            "-evalue", str(evalue),
-            "-soft_masking", soft_masking,
-            "-dust", dust,
-            "-outfmt", outfmt,
-            "-num_threads", str(threads),
-        ]
+        cmd = ["blastn", "-query", str(fasta_path), "-db", str(db_prefix), "-task", blast_task,
+               "-evalue", str(evalue), "-soft_masking", soft_masking, "-dust", dust,
+               "-outfmt", outfmt, "-num_threads", str(threads)]
         if perc_identity and perc_identity > 0:
             cmd += ["-perc_identity", str(perc_identity)]
         if word_size:
             cmd += ["-word_size", str(word_size)]
-
         console.log("Running BLAST: " + " ".join(cmd))
         with open(blast_tsv, "w") as fh:
             subprocess.run(cmd, check=True, stdout=fh, stderr=subprocess.PIPE)
 
         blast_cols = ["qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
                       "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen", "slen"]
-        raw = pd.read_csv(blast_tsv, sep="\t", names=blast_cols, dtype={"qseqid": str, "sseqid": str}, low_memory=False)
+        raw = pl.read_csv(blast_tsv, separator="\t", has_header=False, new_columns=blast_cols,
+                          dtypes={"qseqid": pl.Utf8, "sseqid": pl.Utf8})
+        raw = raw.filter(pl.col('qseqid') != pl.col('sseqid'))
+        raw = raw.with_columns([
+            pl.col("qseqid").map_elements(lambda x: id_pos.get(str(x)), return_dtype=pl.Int64).alias("q_idx"),
+            pl.col("sseqid").map_elements(lambda x: id_pos.get(str(x)), return_dtype=pl.Int64).alias("s_idx"),
+        ]).drop_nulls(subset=['q_idx','s_idx'])
+        raw = raw.filter(pl.col('q_idx') < pl.col('s_idx'))
 
-        raw = raw[raw['qseqid'] != raw['sseqid']].copy()
-        raw['q_idx'] = raw['qseqid'].map(id_pos)
-        raw['s_idx'] = raw['sseqid'].map(id_pos)
-        raw = raw[raw['q_idx'] < raw['s_idx']].copy()
+        hits_blast_df = raw.select(blast_cols)
+        if all_neigh is not None and all_neigh.height > 0 and 'temp_seqid' in all_neigh.columns and 'seqid' in all_neigh.columns:
+            hits_blast_df = hits_blast_df.join(all_neigh[['temp_seqid','seqid']], left_on='qseqid', right_on='temp_seqid', how='left')
 
-        hits_blast_df = raw[blast_cols].reset_index(drop=True)
-        hits_blast_df = hits_blast_df.merge(all_neigh[["temp_seqid","seqid"]], left_on="qseqid", right_on="temp_seqid", how="left")
-
-        console.log(f"Raw BLAST HSPs (unique unordered, no self): {len(hits_blast_df)}")
-
+        console.log(f"Raw BLAST HSPs (unique unordered, no self): {hits_blast_df.height}")
         if write_outputs:
-            hits_blast_df.to_csv(out / 'pairwise_hits_blast.tsv', sep='\t', index=False)
+            hits_blast_df.write_csv(out / 'pairwise_hits_blast.tsv', separator='\t', include_header=False)
 
         skani_df = _skani_like_from_blast(hits_blast_df, seq_lengths, round_digits=3,
                                           overlap_on=overlap_on, overlap_tol=overlap_tol)
         if write_outputs:
-            skani_df.to_csv(out / 'skani_like_blast.tsv', sep='\t', index=False)
+            skani_df.write_csv(out / 'skani_like_blast.tsv', separator='\t', include_header=False)
 
-        # If the caller did not request nucleotide alignment rows (nt_links off)
-        # then return the skani summary and an empty alignment rows DataFrame.
         if not nt_links:
-            empty_align = pd.DataFrame(columns=["query","query_start","query_end","ref","ref_start","ref_end","ani"])
-            # still attempt UID mapping and file write
+            empty_align = pl.DataFrame({"query": [], "query_start": [], "query_end": [],
+                                        "ref": [], "ref_start": [], "ref_end": [], "ani": []})
             try:
                 agg_uid = _map_and_write_pairwise_ani_uid(skani_df, mode_suffix='blastn')
                 if agg_uid is not None:
@@ -661,19 +608,18 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                 pass
             return skani_df, empty_align
 
-        align_rows = hits_blast_df.rename(columns={
+        align_rows = hits_blast_df.rename({
             'qseqid': 'query', 'qstart': 'query_start', 'qend': 'query_end',
             'sseqid': 'ref', 'sstart': 'ref_start', 'send': 'ref_end', 'pident': 'ani'
-        })[['query', 'query_start', 'query_end', 'ref', 'ref_start', 'ref_end', 'ani']].copy()
+        }).select(['query', 'query_start', 'query_end', 'ref', 'ref_start', 'ref_end', 'ani'])
 
-        # Normalize IDs and apply start offsets using `all_neigh` mapping (make outputs use canonical seqid)
-        if all_neigh is not None and not all_neigh.empty:
+        if all_neigh is not None and all_neigh.height > 0:
             start_map, id_map = {}, {}
-            for _, nr in all_neigh.iterrows():
-                temp = str(nr['temp_seqid']) if 'temp_seqid' in nr and pd.notna(nr['temp_seqid']) else None
-                seqid = str(nr['seqid']) if 'seqid' in nr and pd.notna(nr['seqid']) else temp
-                start_win = int(nr['start_win']) if 'start_win' in nr and pd.notna(nr['start_win']) else 0
-                for key in set([temp, seqid]):
+            for nr in all_neigh.iter_rows(named=True):
+                temp = str(nr.get('temp_seqid')) if ('temp_seqid' in all_neigh.columns and nr.get('temp_seqid') is not None) else None
+                seqid = str(nr.get('seqid')) if ('seqid' in all_neigh.columns and nr.get('seqid') is not None) else temp
+                start_win = int(nr.get('start_win')) if ('start_win' in all_neigh.columns and nr.get('start_win') is not None) else 0
+                for key in {temp, seqid}:
                     if not key:
                         continue
                     start_map[key] = start_win
@@ -683,43 +629,42 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                     id_map[Path(key).name] = seqid
                     id_map[Path(key).stem] = seqid
 
-            def _find_offset(name: str) -> int:
-                if pd.isna(name):
-                    return 0
+            def _map_to_seqid(name: str) -> str:
+                if _is_na(name):
+                    return name
                 name = str(name)
-                canonical = id_map.get(name) or id_map.get(Path(name).name) or id_map.get(Path(name).stem) or name
+                return id_map.get(name) or id_map.get(Path(name).name) or id_map.get(Path(name).stem) or name
+
+            def _find_offset(name: str) -> int:
+                if _is_na(name):
+                    return 0
+                canonical = _map_to_seqid(name)
                 return (start_map.get(canonical)
                         or start_map.get(Path(canonical).name)
                         or start_map.get(Path(canonical).stem)
                         or 0)
 
-            def _map_to_seqid(name: str) -> str:
-                if pd.isna(name):
-                    return name
-                name = str(name)
-                return id_map.get(name) or id_map.get(Path(name).name) or id_map.get(Path(name).stem) or name
+            align_rows = align_rows.with_columns([
+                pl.col("query").map_elements(_map_to_seqid).alias("query"),
+                pl.col("ref").map_elements(_map_to_seqid).alias("ref"),
+            ])
 
-            # adjust HSP coordinates to global coords and map ids
-            align_rows["q_offset"] = align_rows["query"].apply(_find_offset)
-            align_rows["r_offset"] = align_rows["ref"].apply(_find_offset)
+            align_rows = align_rows.with_columns([
+                pl.col("query").map_elements(_find_offset).alias("q_offset"),
+                pl.col("ref").map_elements(_find_offset).alias("r_offset"),
+            ])
+            align_rows = align_rows.with_columns([
+                (pl.col("query_start").cast(pl.Int64) + pl.col("q_offset")).alias("query_start"),
+                (pl.col("query_end").cast(pl.Int64) + pl.col("q_offset")).alias("query_end"),
+                (pl.col("ref_start").cast(pl.Int64) + pl.col("r_offset")).alias("ref_start"),
+                (pl.col("ref_end").cast(pl.Int64) + pl.col("r_offset")).alias("ref_end"),
+            ]).drop(["q_offset", "r_offset"])
 
-            align_rows["query_start"] = pd.to_numeric(align_rows["query_start"], errors="coerce") + align_rows["q_offset"]
-            align_rows["query_end"]   = pd.to_numeric(align_rows["query_end"], errors="coerce") + align_rows["q_offset"]
-            align_rows["ref_start"]   = pd.to_numeric(align_rows["ref_start"], errors="coerce") + align_rows["r_offset"]
-            align_rows["ref_end"]     = pd.to_numeric(align_rows["ref_end"], errors="coerce") + align_rows["r_offset"]
-
-            align_rows["query"] = align_rows["query"].apply(_map_to_seqid)
-            align_rows["ref"]   = align_rows["ref"].apply(_map_to_seqid)
-
-            align_rows = align_rows.drop(columns=["q_offset", "r_offset"])
-
-            # map skani summary pairs from temp ids -> canonical seqid
-            if not skani_df.empty:
-                skani_df = skani_df.copy()
-                skani_df['Ref_name'] = skani_df['Ref_name'].apply(_map_to_seqid)
-                skani_df['Query_name'] = skani_df['Query_name'].apply(_map_to_seqid)
-
-            # attempt to map skani summary to neighborhood unique_id and write aggregated UID table
+            if skani_df.height > 0:
+                skani_df = skani_df.with_columns([
+                    pl.col('Ref_name').map_elements(_map_to_seqid).alias('Ref_name'),
+                    pl.col('Query_name').map_elements(_map_to_seqid).alias('Query_name'),
+                ])
             try:
                 agg_uid = _map_and_write_pairwise_ani_uid(skani_df, mode_suffix='blastn')
                 if agg_uid is not None:
@@ -728,148 +673,106 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                 pass
 
         return skani_df, align_rows
-    
-    elif nt_aln_mode.lower() in ('intergenic_blast', 'intergenic_blastn'):
 
-        # write intergenic fasta using provided GFF
+    if nt_aln_mode and nt_aln_mode.lower() in ('intergenic_blast', 'intergenic_blastn'):
         inter_fa = out / 'intergenic.fasta'
         console.log(f"Writing intergenic FASTA to {inter_fa}")
         meta_df = _write_intergenic_fasta(all_gff, str(fasta_path), str(inter_fa), all_neigh=all_neigh)
-        if meta_df.empty:
+        if meta_df.height == 0:
             console.log("No intergenic sequences produced; exiting")
-            return pd.DataFrame(columns=["Ref_name","Query_name","ANI","Align_fraction_ref","Align_fraction_query"]), pd.DataFrame()
+            return pl.DataFrame(columns=["Ref_name","Query_name","ANI","Align_fraction_ref","Align_fraction_query"]), pl.DataFrame()
 
-        # make BLAST DB and run blastn-short
         db_prefix = out / 'intergenic_db'
         console.log(f"Making BLAST DB for intergenic sequences at {db_prefix}")
-        subprocess.run([
-            "makeblastdb",
-            "-in", str(inter_fa),
-            "-dbtype", "nucl",
-            "-out", str(db_prefix)
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(["makeblastdb", "-in", str(inter_fa), "-dbtype", "nucl", "-out", str(db_prefix)],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
         blast_tsv = out / 'intergenic_allvsall.outfmt6.tsv'
         outfmt = "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen"
-        cmd = [
-            "blastn",
-            "-query", str(inter_fa),
-            "-db", str(db_prefix),
-            "-task", "blastn-short",              # change from 'blastn-short' to 'blastn'
-            "-evalue", "1e-3",              # more stringent, but still permissive
-            "-word_size", "4",              # minimum allowed, most sensitive
-            "-reward", "1",
-            "-penalty", "-1",
-            "-gapopen", "2",
-            "-gapextend", "2",
-            "-dust", "no",
-            "-soft_masking", "false",
-            "-outfmt", outfmt,
-            "-num_threads", str(threads),
-        ]
+        cmd = ["blastn", "-query", str(inter_fa), "-db", str(db_prefix), "-task", "blastn-short",
+               "-evalue", "1e-3", "-word_size", "4", "-reward", "1", "-penalty", "-1",
+               "-gapopen", "2", "-gapextend", "2", "-dust", "no", "-soft_masking", "false",
+               "-outfmt", outfmt, "-num_threads", str(threads)]
         console.log("Running intergenic BLAST: " + " ".join(cmd))
         with open(blast_tsv, "w") as fh:
             subprocess.run(cmd, check=True, stdout=fh, stderr=subprocess.PIPE)
 
         blast_cols = ["qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
                       "qstart", "qend", "sstart", "send", "evalue", "bitscore", "qlen", "slen"]
-        raw = pd.read_csv(blast_tsv, sep="\t", names=blast_cols, dtype={"qseqid": str, "sseqid": str}, low_memory=False)
+        raw = pl.read_csv(blast_tsv, separator="\t", has_header=False, new_columns=blast_cols,
+                          dtypes={"qseqid": pl.Utf8, "sseqid": pl.Utf8})
 
-        # merge with meta to map temp ids -> canonical seqid and start offsets
-        meta = meta_df.copy()
-        meta = meta.rename(columns={'temp_seqid': 'temp_id', 'seqid': 'canonical_seqid', 'start_win': 'start_win'})
-        raw = raw.merge(meta[['temp_id', 'canonical_seqid', 'start_win']], left_on='qseqid', right_on='temp_id', how='left')
-        raw = raw.rename(columns={'canonical_seqid': 'q_canonical', 'start_win': 'q_start_win'})
-        raw = raw.drop(columns=['temp_id'])
-        raw = raw.merge(meta[['temp_id', 'canonical_seqid', 'start_win']], left_on='sseqid', right_on='temp_id', how='left')
-        raw = raw.rename(columns={'canonical_seqid': 's_canonical', 'start_win': 's_start_win'})
-        raw = raw.drop(columns=['temp_id'])
+        meta = meta_df.clone().rename({'temp_seqid': 'temp_id', 'seqid': 'canonical_seqid', 'start_win': 'start_win'})
+        raw = raw.join(meta.select(['temp_id', 'canonical_seqid', 'start_win']), left_on='qseqid', right_on='temp_id', how='left')
+        raw = raw.rename({'canonical_seqid': 'q_canonical', 'start_win': 'q_start_win'}).drop(['temp_id'])
+        raw = raw.join(meta.select(['temp_id', 'canonical_seqid', 'start_win']), left_on='sseqid', right_on='temp_id', how='left')
+        raw = raw.rename({'canonical_seqid': 's_canonical', 'start_win': 's_start_win'}).drop(['temp_id'])
 
-        # drop self hits mapped to same canonical seqid
-        raw = raw[(raw['q_canonical'].notna()) & (raw['s_canonical'].notna())]
-        raw = raw[raw['q_canonical'] != raw['s_canonical']]
+        raw = raw.filter(pl.col('q_canonical').is_not_null() & pl.col('s_canonical').is_not_null())
+        raw = raw.filter(pl.col('q_canonical') != pl.col('s_canonical'))
 
-        # compute global coordinates for HSPs
-        raw['qstart_g'] = pd.to_numeric(raw['qstart'], errors='coerce') + pd.to_numeric(raw['q_start_win'], errors='coerce') - 1
-        raw['qend_g'] = pd.to_numeric(raw['qend'], errors='coerce') + pd.to_numeric(raw['q_start_win'], errors='coerce') - 1
-        raw['sstart_g'] = pd.to_numeric(raw['sstart'], errors='coerce') + pd.to_numeric(raw['s_start_win'], errors='coerce') - 1
-        raw['send_g'] = pd.to_numeric(raw['send'], errors='coerce') + pd.to_numeric(raw['s_start_win'], errors='coerce') - 1
+        raw = raw.with_columns([
+            (pl.col('qstart').cast(pl.Int64) + pl.col('q_start_win').cast(pl.Int64) - 1).alias('qstart_g'),
+            (pl.col('qend').cast(pl.Int64) + pl.col('q_start_win').cast(pl.Int64) - 1).alias('qend_g'),
+            (pl.col('sstart').cast(pl.Int64) + pl.col('s_start_win').cast(pl.Int64) - 1).alias('sstart_g'),
+            (pl.col('send').cast(pl.Int64) + pl.col('s_start_win').cast(pl.Int64) - 1).alias('send_g'),
+        ])
 
-        # normalize ordering so q < s lexicographically to get unordered pair uniqueness
-        def _orient_row(r):
-            if r['q_canonical'] > r['s_canonical']:
-                # swap fields
-                return pd.Series({
-                    'qseqid': r['s_canonical'], 'sseqid': r['q_canonical'],
-                    'pident': r['pident'], 'length': r['length'],
-                    'qstart': r['sstart_g'], 'qend': r['send_g'],
-                    'sstart': r['qstart_g'], 'send': r['qend_g'],
-                    'qlen': r.get('qlen', None), 'slen': r.get('slen', None),
-                    'mismatch': r.get('mismatch', None), 'gapopen': r.get('gapopen', None),
-                    'evalue': r.get('evalue', None), 'bitscore': r.get('bitscore', None)
-                })
-            else:
-                return pd.Series({
-                    'qseqid': r['q_canonical'], 'sseqid': r['s_canonical'],
-                    'pident': r['pident'], 'length': r['length'],
-                    'qstart': r['qstart_g'], 'qend': r['qend_g'],
-                    'sstart': r['sstart_g'], 'send': r['send_g'],
-                    'qlen': r.get('qlen', None), 'slen': r.get('slen', None),
-                    'mismatch': r.get('mismatch', None), 'gapopen': r.get('gapopen', None),
-                    'evalue': r.get('evalue', None), 'bitscore': r.get('bitscore', None)
-                })
+        cond = pl.col('q_canonical') > pl.col('s_canonical')
+        hits_blast_df = raw.with_columns([
+            pl.when(cond).then(pl.col('s_canonical')).otherwise(pl.col('q_canonical')).alias('qseqid'),
+            pl.when(cond).then(pl.col('q_canonical')).otherwise(pl.col('s_canonical')).alias('sseqid'),
+            pl.when(cond).then(pl.col('sstart_g')).otherwise(pl.col('qstart_g')).alias('qstart'),
+            pl.when(cond).then(pl.col('send_g')).otherwise(pl.col('qend_g')).alias('qend'),
+            pl.when(cond).then(pl.col('qstart_g')).otherwise(pl.col('sstart_g')).alias('sstart'),
+            pl.when(cond).then(pl.col('qend_g')).otherwise(pl.col('send_g')).alias('send'),
+        ]).select([
+            'qseqid','sseqid','pident','length','qstart','qend','sstart','send','qlen','slen','mismatch','gapopen','evalue','bitscore'
+        ])
 
-        norm = raw.apply(_orient_row, axis=1)
-        hits_blast_df = norm.reset_index(drop=True)
-
-        console.log(f"Intergenic BLAST HSPs (mapped to seqid): {len(hits_blast_df)}")
+        console.log(f"Intergenic BLAST HSPs (mapped to seqid): {hits_blast_df.height}")
         if write_outputs:
-            hits_blast_df.to_csv(out / 'pairwise_hits_intergenic_blast.tsv', sep='\t', index=False)
+            hits_blast_df.write_csv(out / 'pairwise_hits_intergenic_blast.tsv', separator='\t', include_header=False)
 
-        # build seq_lengths map from all_neigh if available
         seq_lengths_map = {}
-        if all_neigh is not None and not all_neigh.empty and 'seqid' in all_neigh.columns and 'sequence' in all_neigh.columns:
-            for _, nr in all_neigh.iterrows():
-                sid = str(nr['seqid']) if pd.notna(nr.get('seqid')) else None
+        if all_neigh is not None and all_neigh.height > 0 and 'seqid' in all_neigh.columns and 'sequence' in all_neigh.columns:
+            for nr in all_neigh.iter_rows(named=True):
+                sid = str(nr.get('seqid')) if nr.get('seqid') is not None else None
                 if not sid:
                     continue
                 seq = nr.get('sequence') if 'sequence' in nr else None
-                if pd.notna(seq) and seq is not None:
+                if seq is not None:
                     seq_lengths_map[sid] = len(seq)
 
-        # compute skani-like summary
         skani_df = _skani_like_from_blast(hits_blast_df, seq_lengths_map or seq_lengths, round_digits=3,
                                           overlap_on=overlap_on, overlap_tol=overlap_tol)
         if write_outputs:
-            skani_df.to_csv(out / 'skani_like_intergenic_blast.tsv', sep='\t', index=False)
+            skani_df.write_csv(out / 'skani_like_intergenic_blast.tsv', separator='\t', include_header=False)
 
-        align_rows = hits_blast_df.rename(columns={
+        align_rows = hits_blast_df.rename({
             'qseqid': 'query', 'qstart': 'query_start', 'qend': 'query_end',
             'sseqid': 'ref', 'sstart': 'ref_start', 'send': 'ref_end', 'pident': 'ani'
-        })[['query', 'query_start', 'query_end', 'ref', 'ref_start', 'ref_end', 'ani']].copy()
+        }).select(['query', 'query_start', 'query_end', 'ref', 'ref_start', 'ref_end', 'ani'])
 
         return skani_df, align_rows
-    
-    elif nt_aln_mode.lower() == 'fastani':
+
+    if nt_aln_mode and nt_aln_mode.lower() == 'fastani':
         split_dir = out / 'ani_split'
         split_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            from Bio import SeqIO
-        except Exception as exc:
-            raise ImportError('Biopython is required for fastANI mode (SeqIO)') from exc
+        from Bio import SeqIO
 
         genome_files = []
         file_to_seqid = {}
         temp_to_seqid = {}
         start_map_init = {}
-        if all_neigh is not None and not all_neigh.empty:
-            for _, nr in all_neigh.iterrows():
-                temp = str(nr['temp_seqid']) if 'temp_seqid' in nr and pd.notna(nr['temp_seqid']) else None
-                seqid = str(nr['seqid']) if 'seqid' in nr and pd.notna(nr['seqid']) else temp
+        if all_neigh is not None and all_neigh.height > 0:
+            for nr in all_neigh.iter_rows(named=True):
+                temp = str(nr.get('temp_seqid')) if ('temp_seqid' in all_neigh.columns and nr.get('temp_seqid') is not None) else None
+                seqid = str(nr.get('seqid')) if ('seqid' in all_neigh.columns and nr.get('seqid') is not None) else temp
                 if temp:
                     temp_to_seqid[temp] = seqid
-                if seqid and 'start_win' in nr and pd.notna(nr['start_win']):
-                    start_map_init[seqid] = int(nr['start_win'])
+                if seqid and 'start_win' in nr and nr.get('start_win') is not None:
+                    start_map_init[seqid] = int(nr.get('start_win'))
 
         for idx, record in enumerate(SeqIO.parse(str(fasta_path), 'fasta')):
             header = record.id
@@ -889,13 +792,7 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                 fh.write(p + '\n')
 
         fastani_output = out / 'fastani_output.tsv'
-        cmd = [
-            'fastANI',
-            '--ql', str(file_list_path),
-            '--rl', str(file_list_path),
-            '-o', str(fastani_output),
-            '-t', str(threads)
-        ]
+        cmd = ['fastANI', '--ql', str(file_list_path), '--rl', str(file_list_path), '-o', str(fastani_output), '-t', str(threads)]
         fastani_log = out / 'fastani_all.log'
         with open(fastani_log, 'w') as logfh:
             subprocess.run(cmd, check=True, stdout=logfh, stderr=logfh, text=True)
@@ -903,50 +800,44 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
         if not fastani_output.exists():
             raise FileNotFoundError(f"fastANI did not produce expected output at {fastani_output}")
 
-        df = pd.read_csv(fastani_output, sep='\t', header=None,
-                         names=['query', 'reference', 'ani', 'frags_matched', 'frags_total_query'])
-        reverse_frag_total = df.set_index(['reference', 'query'])['frags_total_query'].to_dict()
+        df = pl.read_csv(fastani_output, separator='\t', has_header=False,
+                         new_columns=['query', 'reference', 'ani', 'frags_matched', 'frags_total_query']).with_columns([
+            pl.col('ani').cast(pl.Float64),
+            pl.col('frags_matched').cast(pl.Int64),
+            pl.col('frags_total_query').cast(pl.Int64)
+        ])
 
-        rows = []
-        for _, row in df.iterrows():
-            q = row['query']; r = row['reference']
-            ani = row['ani']
-            frags_matched = row['frags_matched']
-            frags_total_query = row['frags_total_query']
-            frags_total_ref = reverse_frag_total.get((q, r), None)
+        df_rev = df.rename({'query': 'reference', 'reference': 'query', 'frags_total_query': 'frags_total_ref'})
+        dfj = df.join(df_rev.select(['query','reference','frags_total_ref']), on=['query','reference'], how='left')
 
-            frac_q = (frags_matched / frags_total_query) if frags_total_query else 0
-            frac_r = (frags_matched / frags_total_ref) if frags_total_ref else frac_q
+        skani_like_df = dfj.with_columns([
+            (pl.col('frags_matched') / pl.col('frags_total_query')).fill_null(0.0).alias('Align_fraction_query'),
+            (pl.col('frags_matched') / pl.col('frags_total_ref')).fill_null(pl.col('frags_matched') / pl.col('frags_total_query')).alias('Align_fraction_ref'),
+        ]).with_columns([
+            (pl.col('Align_fraction_query') * 100.0).alias('Align_fraction_query'),
+            (pl.col('Align_fraction_ref') * 100.0).alias('Align_fraction_ref'),
+            pl.col('reference').str.split('/').list.last().alias('Ref_name'),
+            pl.col('query').str.split('/').list.last().alias('Query_name')
+        ]).select(['Ref_name','Query_name','ani','Align_fraction_ref','Align_fraction_query'])
 
-            rows.append({
-                'Ref_name': Path(str(r)).name,
-                'Query_name': Path(str(q)).name,
-                'ANI': float(ani),
-                'Align_fraction_ref': float(frac_r) * 100.0,
-                'Align_fraction_query': float(frac_q) * 100.0
-            })
+        skani_like_df = skani_like_df.filter(pl.col('Ref_name') != pl.col('Query_name'))
 
-        skani_like_df = pd.DataFrame(rows)
-        skani_like_df = skani_like_df[skani_like_df['Ref_name'] != skani_like_df['Query_name']]
-
-        def _pair_key(row):
-            a, b = row['Ref_name'], row['Query_name']
-            return tuple(sorted((a, b)))
-
-        skani_like_df['pair_key'] = skani_like_df.apply(_pair_key, axis=1)
-        agg = skani_like_df.groupby('pair_key').agg({
-            'ANI': 'mean',
-            'Align_fraction_ref': 'mean',
-            'Align_fraction_query': 'mean'
-        }).reset_index()
-        agg['Ref_name'] = agg['pair_key'].apply(lambda t: t[0])
-        agg['Query_name'] = agg['pair_key'].apply(lambda t: t[1])
-        pairwise_ani = agg[['Ref_name', 'Query_name', 'ANI', 'Align_fraction_ref', 'Align_fraction_query']]
+        agg = skani_like_df.with_columns([
+            pl.min_horizontal(['Ref_name','Query_name']).alias('A'),
+            pl.max_horizontal(['Ref_name','Query_name']).alias('B'),
+        ]).group_by(['A','B']).agg([
+            pl.col('ani').mean().alias('ANI'),
+            pl.col('Align_fraction_ref').mean().alias('Align_fraction_ref'),
+            pl.col('Align_fraction_query').mean().alias('Align_fraction_query'),
+        ]).with_columns([
+            pl.col('A').alias('Ref_name'),
+            pl.col('B').alias('Query_name')
+        ]).select(['Ref_name','Query_name','ANI','Align_fraction_ref','Align_fraction_query'])
+        pairwise_ani = agg
 
         if write_outputs:
-            pairwise_ani.to_csv(out / 'pairwise_ani_fastani.tsv', sep='\t', index=False)
+            pairwise_ani.write_csv(out / 'pairwise_ani_fastani.tsv', separator='\t', include_header=False)
 
-        # attempt to map fastANI results to neighborhood unique_id and write aggregated UID table
         try:
             agg_uid = _map_and_write_pairwise_ani_uid(pairwise_ani, mode_suffix='fastani')
             if agg_uid is not None:
@@ -954,13 +845,10 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
         except Exception:
             pass
 
-        # If caller did not request nucleotide alignment rows (nt_links off),
-        # return empty visual/alignments DataFrame
         if not nt_links:
-            empty_vis = pd.DataFrame(columns=["query","ref","ani","query_start","query_end","ref_start","ref_end"])
+            empty_vis = pl.DataFrame(columns=["query","ref","ani","query_start","query_end","ref_start","ref_end"])
             return pairwise_ani, empty_vis
 
-        # parse .visual files per unordered pair
         work_dir = out / 'fastani_pairwise_visual'
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -980,9 +868,9 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                     return c
             raise FileNotFoundError(f"Could not resolve path for genome identifier '{name}'")
 
-        dfp = pairwise_ani.copy()
+        dfp = pairwise_ani.clone()
         if 'Align_fraction_ref' in dfp.columns or 'Align_fraction_query' in dfp.columns:
-            dfp = dfp.dropna(subset=[c for c in ['Align_fraction_ref', 'Align_fraction_query'] if c in dfp.columns])
+            dfp = dfp.drop_nulls(subset=[c for c in ['Align_fraction_ref', 'Align_fraction_query'] if c in dfp.columns])
 
         visual_rows = []
         seen_pairs = set()
@@ -991,8 +879,8 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
         task = progress.add_task("[cyan]Running pairwise FastANI visualize...", total=len(dfp))
         progress.start()
 
-        for row in dfp.itertuples(index=False):
-            q_name = getattr(row, 'Query_name'); r_name = getattr(row, 'Ref_name')
+        for row in dfp.iter_rows():
+            q_name = row[dfp.columns.index('Query_name')]; r_name = row[dfp.columns.index('Ref_name')]
             pair_key = tuple(sorted([str(q_name), str(r_name)]))
             if pair_key in seen_pairs:
                 progress.advance(task); continue
@@ -1004,14 +892,7 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                 q_path = _resolve_path(pair_key[0])
                 r_path = _resolve_path(pair_key[1])
                 temp_base = work_dir / f"{raw0}__vs__{raw1}.fastani"
-                cmd = [
-                    'fastANI',
-                    '-q', str(q_path),
-                    '-r', str(r_path),
-                    '--visualize',
-                    '-o', str(temp_base),
-                    '-t', str(threads)
-                ]
+                cmd = ['fastANI', '-q', str(q_path), '-r', str(r_path), '--visualize', '-o', str(temp_base), '-t', str(threads)]
                 temp_log = Path(str(temp_base) + '.fastani.log')
                 try:
                     with open(temp_log, 'w') as logfh:
@@ -1023,63 +904,48 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                     visual_file.rename(out_file)
 
             if out_file.exists():
-                parsed = pd.read_csv(
-                    out_file, sep='\t', header=None,
-                    names=['query','ref','ani','na1','na2','na3',
-                           'query_start','query_end','ref_start','ref_end','na4','na5'],
-                    dtype={'query': str, 'ref': str}
-                )
-                parsed = parsed[["query","ref","ani","query_start","query_end","ref_start","ref_end"]]
-                parsed['query'] = parsed['query'].apply(lambda s: Path(str(s)).name if pd.notna(s) else s)
-                parsed['ref'] = parsed['ref'].apply(lambda s: Path(str(s)).name if pd.notna(s) else s)
+                parsed = pl.read_csv(out_file, separator='\t', has_header=False,
+                                     new_columns=['query','ref','ani','na1','na2','na3','query_start','query_end','ref_start','ref_end','na4','na5'],
+                                     dtypes={'query': pl.Utf8, 'ref': pl.Utf8})
+                parsed = parsed.select(["query","ref","ani","query_start","query_end","ref_start","ref_end"]).with_columns([
+                    pl.col('query').map_elements(lambda s: Path(str(s)).name if s is not None else s).alias('query'),
+                    pl.col('ref').map_elements(lambda s: Path(str(s)).name if s is not None else s).alias('ref'),
+                ])
                 visual_rows.append(parsed)
             progress.advance(task)
 
         progress.stop()
-        visual_df = pd.concat(visual_rows, ignore_index=True) if visual_rows else pd.DataFrame(
+        visual_df = pl.concat(visual_rows, how="vertical") if visual_rows else pl.DataFrame(
             columns=["query","ref","ani","query_start","query_end","ref_start","ref_end"])
 
         if 'ani' in visual_df.columns:
-            visual_df['ani'] = pd.to_numeric(visual_df['ani'], errors='coerce')
+            visual_df = visual_df.with_columns(pl.col('ani').cast(pl.Float64))
 
-        # Map filenames/backed ids to canonical seqid and apply start offsets if all_neigh provided
-        if all_neigh is not None and not all_neigh.empty:
-            # build id_map/start_map from temp_to_seqid and start_map_init
+        if all_neigh is not None and all_neigh.height > 0:
             id_map = {}
             start_map = {}
-            # include mappings we already have for split files
             for k, v in file_to_seqid.items():
-                id_map[k] = v
-                id_map[Path(k).name] = v
-                id_map[Path(k).stem] = v
+                id_map[k] = v; id_map[Path(k).name] = v; id_map[Path(k).stem] = v
             for seqid, st in start_map_init.items():
-                start_map[seqid] = st
-                start_map[Path(seqid).name] = st
-                start_map[Path(seqid).stem] = st
-
-            # also include mappings from all_neigh rows (temp_seqid -> seqid)
-            for _, nr in all_neigh.iterrows():
-                temp = str(nr['temp_seqid']) if 'temp_seqid' in nr and pd.notna(nr['temp_seqid']) else None
-                seqid = str(nr['seqid']) if 'seqid' in nr and pd.notna(nr['seqid']) else temp
-                start_win = int(nr['start_win']) if 'start_win' in nr and pd.notna(nr['start_win']) else 0
+                start_map[seqid] = st; start_map[Path(seqid).name] = st; start_map[Path(seqid).stem] = st
+            for nr in all_neigh.iter_rows(named=True):
+                temp = str(nr.get('temp_seqid')) if ('temp_seqid' in all_neigh.columns and nr.get('temp_seqid') is not None) else None
+                seqid = str(nr.get('seqid')) if ('seqid' in all_neigh.columns and nr.get('seqid') is not None) else temp
+                start_win = int(nr.get('start_win')) if ('start_win' in all_neigh.columns and nr.get('start_win') is not None) else 0
                 for key in set([temp, seqid]):
                     if not key:
                         continue
-                    id_map[key] = seqid
-                    id_map[Path(key).name] = seqid
-                    id_map[Path(key).stem] = seqid
-                    start_map[key] = start_win
-                    start_map[Path(key).name] = start_win
-                    start_map[Path(key).stem] = start_win
+                    id_map[key] = seqid; id_map[Path(key).name] = seqid; id_map[Path(key).stem] = seqid
+                    start_map[key] = start_win; start_map[Path(key).name] = start_win; start_map[Path(key).stem] = start_win
 
             def _map_to_seqid_fast(name: str) -> str:
-                if pd.isna(name):
+                if _is_na(name):
                     return name
                 name = str(name)
                 return id_map.get(name) or id_map.get(Path(name).name) or id_map.get(Path(name).stem) or name
 
             def _find_offset_fast(name: str) -> int:
-                if pd.isna(name):
+                if _is_na(name):
                     return 0
                 name = str(name)
                 canonical = _map_to_seqid_fast(name)
@@ -1088,30 +954,30 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                         or start_map.get(Path(canonical).stem)
                         or 0)
 
-            # map pairwise_ani names
-            pairwise_ani = pairwise_ani.copy()
-            pairwise_ani['Ref_name'] = pairwise_ani['Ref_name'].apply(_map_to_seqid_fast)
-            pairwise_ani['Query_name'] = pairwise_ani['Query_name'].apply(_map_to_seqid_fast)
+            pairwise_ani = pairwise_ani.with_columns([
+                pl.col('Ref_name').map_elements(_map_to_seqid_fast).alias('Ref_name'),
+                pl.col('Query_name').map_elements(_map_to_seqid_fast).alias('Query_name'),
+            ])
 
-            # apply offsets to visual_df coordinates and map ids
-            if not visual_df.empty:
-                visual_df = visual_df.copy()
-                visual_df['q_off'] = visual_df['query'].apply(_find_offset_fast)
-                visual_df['r_off'] = visual_df['ref'].apply(_find_offset_fast)
-                visual_df['query_start'] = pd.to_numeric(visual_df['query_start'], errors='coerce') + visual_df['q_off']
-                visual_df['query_end'] = pd.to_numeric(visual_df['query_end'], errors='coerce') + visual_df['q_off']
-                visual_df['ref_start'] = pd.to_numeric(visual_df['ref_start'], errors='coerce') + visual_df['r_off']
-                visual_df['ref_end'] = pd.to_numeric(visual_df['ref_end'], errors='coerce') + visual_df['r_off']
-                visual_df['query'] = visual_df['query'].apply(_map_to_seqid_fast)
-                visual_df['ref'] = visual_df['ref'].apply(_map_to_seqid_fast)
-                visual_df = visual_df.drop(columns=['q_off', 'r_off'])
+            if visual_df.height > 0:
+                visual_df = visual_df.with_columns([
+                    pl.col('query').map_elements(_find_offset_fast).alias('q_off'),
+                    pl.col('ref').map_elements(_find_offset_fast).alias('r_off'),
+                ])
+                visual_df = visual_df.with_columns([
+                    (pl.col('query_start').cast(pl.Int64) + pl.col('q_off')).alias('query_start'),
+                    (pl.col('query_end').cast(pl.Int64) + pl.col('q_off')).alias('query_end'),
+                    (pl.col('ref_start').cast(pl.Int64) + pl.col('r_off')).alias('ref_start'),
+                    (pl.col('ref_end').cast(pl.Int64) + pl.col('r_off')).alias('ref_end'),
+                    pl.col('query').map_elements(_map_to_seqid_fast).alias('query'),
+                    pl.col('ref').map_elements(_map_to_seqid_fast).alias('ref'),
+                ]).drop(['q_off','r_off'])
 
         return pairwise_ani, visual_df
-    elif nt_aln_mode.lower() in ("minimap2", "mappy"):
 
+    if nt_aln_mode and nt_aln_mode.lower() in ("minimap2", "mappy"):
         plans = [(str(fasta_path), mm2_preset, mm2_min_mapq, mm2_threads_per_worker,
                   tid, ids[:id_pos[tid]]) for tid in ids]
-
         rows = []
         from rich.progress import Progress
         with Progress() as progress:
@@ -1122,23 +988,17 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                     rows.extend(fut.result())
                     progress.advance(task)
 
-        hits_df = pd.DataFrame.from_records(rows)
+        hits_df = pl.DataFrame(rows)
         if write_outputs:
-            hits_df.to_csv(out / "pairwise_hits_mappy.tsv", sep="\t", index=False)
+            hits_df.write_csv(out / "pairwise_hits_mappy.tsv", separator="\t", include_header=False)
 
-        # skani-like summary (ANI + coverage)
         skani_df = _skani_like_from_mappy(
-            hits_df, str(fasta_path),
-            round_digits=3,
-            overlap_on=overlap_on,
-            overlap_tol=overlap_tol,
-            require_primary=True,
-            return_percent=True
-        )
+            hits_df, str(fasta_path), round_digits=3,
+            overlap_on=overlap_on, overlap_tol=overlap_tol,
+            require_primary=True, return_percent=True)
         if write_outputs:
-            skani_df.to_csv(out / "skani_like_mappy.tsv", sep="\t", index=False)
+            skani_df.write_csv(out / "skani_like_mappy.tsv", separator="\t", include_header=False)
 
-        # attempt to map mappy skani summary to neighborhood unique_id and write aggregated UID table
         try:
             agg_uid = _map_and_write_pairwise_ani_uid(skani_df, mode_suffix='mappy')
             if agg_uid is not None:
@@ -1146,8 +1006,7 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
         except Exception:
             pass
 
-        # Alignment rows table (HSP-level)
-        align_rows = hits_df.rename(columns={
+        align_rows = hits_df.rename({
             "query_id": "query",
             "q_st": "query_start",
             "q_en": "query_end",
@@ -1155,16 +1014,14 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
             "r_st": "ref_start",
             "r_en": "ref_end",
             "pid": "ani"
-        })[['query', 'query_start', 'query_end',
-            'ref', 'ref_start', 'ref_end', 'ani']].copy()
+        }).select(['query', 'query_start', 'query_end', 'ref', 'ref_start', 'ref_end', 'ani'])
 
-        # 🔥 Normalize IDs and add offsets like in BLAST/FastANI
-        if all_neigh is not None and not all_neigh.empty:
+        if all_neigh is not None and all_neigh.height > 0:
             start_map, id_map = {}, {}
-            for _, nr in all_neigh.iterrows():
-                temp = str(nr['temp_seqid']) if 'temp_seqid' in nr and pd.notna(nr['temp_seqid']) else None
-                seqid = str(nr['seqid']) if 'seqid' in nr and pd.notna(nr['seqid']) else temp
-                start_win = int(nr['start_win']) if 'start_win' in nr and pd.notna(nr['start_win']) else 0
+            for nr in all_neigh.iter_rows(named=True):
+                temp = str(nr.get('temp_seqid')) if ('temp_seqid' in all_neigh.columns and nr.get('temp_seqid') is not None) else None
+                seqid = str(nr.get('seqid')) if ('seqid' in all_neigh.columns and nr.get('seqid') is not None) else temp
+                start_win = int(nr.get('start_win')) if ('start_win' in all_neigh.columns and nr.get('start_win') is not None) else 0
                 for key in set([temp, seqid]):
                     if not key:
                         continue
@@ -1176,7 +1033,7 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                     id_map[Path(key).stem] = seqid
 
             def _find_offset(name: str) -> int:
-                if pd.isna(name):
+                if _is_na(name):
                     return 0
                 name = str(name)
                 canonical = id_map.get(name) or id_map.get(Path(name).name) or id_map.get(Path(name).stem) or name
@@ -1186,24 +1043,23 @@ def run_pairwise_nt(all_neigh: Optional[pd.DataFrame],
                         or 0)
 
             def _map_to_seqid(name: str) -> str:
-                if pd.isna(name):
+                if _is_na(name):
                     return name
                 name = str(name)
                 return id_map.get(name) or id_map.get(Path(name).name) or id_map.get(Path(name).stem) or name
 
-            align_rows["q_offset"] = align_rows["query"].apply(_find_offset)
-            align_rows["r_offset"] = align_rows["ref"].apply(_find_offset)
-
-            align_rows["query_start"] = pd.to_numeric(align_rows["query_start"], errors="coerce") + align_rows["q_offset"]
-            align_rows["query_end"]   = pd.to_numeric(align_rows["query_end"], errors="coerce") + align_rows["q_offset"]
-            align_rows["ref_start"]   = pd.to_numeric(align_rows["ref_start"], errors="coerce") + align_rows["r_offset"]
-            align_rows["ref_end"]     = pd.to_numeric(align_rows["ref_end"], errors="coerce") + align_rows["r_offset"]
-
-            align_rows["query"] = align_rows["query"].apply(_map_to_seqid)
-            align_rows["ref"]   = align_rows["ref"].apply(_map_to_seqid)
-
-            align_rows = align_rows.drop(columns=["q_offset", "r_offset"])
+            align_rows = align_rows.with_columns([
+                pl.col("query").map_elements(_find_offset).alias("q_offset"),
+                pl.col("ref").map_elements(_find_offset).alias("r_offset"),
+            ]).with_columns([
+                (pl.col("query_start").cast(pl.Int64) + pl.col("q_offset")).alias("query_start"),
+                (pl.col("query_end").cast(pl.Int64) + pl.col("q_offset")).alias("query_end"),
+                (pl.col("ref_start").cast(pl.Int64) + pl.col("r_offset")).alias("ref_start"),
+                (pl.col("ref_end").cast(pl.Int64) + pl.col("r_offset")).alias("ref_end"),
+                pl.col("query").map_elements(_map_to_seqid).alias("query"),
+                pl.col("ref").map_elements(_map_to_seqid).alias("ref"),
+            ]).drop(["q_offset","r_offset"])
 
         return skani_df, align_rows
-    else:
-        raise ValueError("nt_aln_mode must be 'blastn', 'fastani', or 'mappy'")
+
+    raise ValueError("nt_aln_mode must be 'blastn', 'intergenic_blast', 'fastani', or 'mappy'")

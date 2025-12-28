@@ -2,20 +2,20 @@ import os
 import math
 import random
 import numpy as np
-import pandas as pd
+import polars as pl
 import matplotlib
 import matplotlib.pyplot as plt
 from hoodini.utils.core import flat, desaturate, darken
 
 def run_arranger(
     *,
-    records: pd.DataFrame,
-    all_gff: pd.DataFrame,
-    all_neigh: pd.DataFrame,
-    den_data: pd.DataFrame,
-    domains_data: pd.DataFrame = None,
-    nc_data: pd.DataFrame = None,
-    genomad_df: pd.DataFrame = None,
+    records: pl.DataFrame,
+    all_gff: pl.DataFrame,
+    all_neigh: pl.DataFrame,
+    den_data: pl.DataFrame,
+    domains_data: pl.DataFrame = None,
+    nc_data: pl.DataFrame = None,
+    genomad_df: pl.DataFrame = None,
     leaf_labels: list[str],
     dendro: dict,
     output: str,
@@ -35,7 +35,7 @@ def run_arranger(
     all_gff.loc[swap_mask, ["start", "end"]] = all_gff.loc[swap_mask, ["end", "start"]].values
 
     all_neigh["unique_id"] = all_neigh["unique_id"].astype(str)
-    all_gff = all_gff.merge(
+    all_gff = all_gff.join(
         all_neigh[["start_target", "end_target", "start_win", "end_win", "strand_win", "unique_id"]],
         on="unique_id",
         how="left"
@@ -97,8 +97,8 @@ def run_arranger(
         )]
         for dcoord, icoord in zip(dendro["dcoord"], dendro["icoord"])
     ]
-    dendrogram = pd.DataFrame({'path': path, "color": [[0, 0, 0, 100]] * len(path)})
-    dendrogram[["Ax", "Ay", "Bx", "By", "Cx", "Cy", "Dx", "Dy"]] = pd.DataFrame(
+    dendrogram = pl.DataFrame({'path': path, "color": [[0, 0, 0, 100]] * len(path)})
+    dendrogram[["Ax", "Ay", "Bx", "By", "Cx", "Cy", "Dx", "Dy"]] = pl.DataFrame(
         [[*p[0], *p[1], *p[2], *p[3]] for p in path], index=dendrogram.index
     )
 
@@ -129,8 +129,8 @@ def run_arranger(
     baseline_y = max_y + y_step
     lines_start = [[x / 100, baseline_y - y_quarter_height] for x in range(-min_thousand, max_thousand + 1000, 1000)]
     lines_end = [[x / 100, baseline_y + y_quarter_height] for x in range(-min_thousand, max_thousand + 1000, 1000)]
-    ticks = pd.DataFrame({'start': lines_start + [[min_x, baseline_y]], 'end': lines_end + [[max_x, baseline_y]]})
-    tick_text = pd.DataFrame({
+    ticks = pl.DataFrame({'start': lines_start + [[min_x, baseline_y]], 'end': lines_end + [[max_x, baseline_y]]})
+    tick_text = pl.DataFrame({
         'text': [str(x) for x in range(-min_thousand, max_thousand + 1000, 1000)],
         'coordinates': [[x / 100, baseline_y + y_quarter_height * 2] for x in range(-min_thousand, max_thousand + 1000, 1000)]
     })
@@ -140,7 +140,7 @@ def run_arranger(
     prevalence = prevalence.round(2).to_dict()
     all_gff["prevalence"] = all_gff["fam_cluster"].map(prevalence)
 
-    families = all_gff["fam_cluster"].dropna().unique().tolist()
+    families = all_gff["fam_cluster"].drop_nulls().unique().to_list()
     colors_rgb = [plt.cm.gist_ncar(random.random()) for _ in families]
     colors_dic = {
         num: desaturate(list(color), 1 - prevalence[num] * 0.6, 1)
@@ -151,12 +151,12 @@ def run_arranger(
     all_gff["linecolor"] = all_gff["fillcolor"].apply(lambda x: darken(x, 0.5, 1))
 
     all_gff = all_gff.drop_duplicates(subset=['start', 'end', "seqid", "target_prot"])
-    all_gff = all_gff.merge(
+    all_gff = all_gff.join(
         records[['assembly_id', 'taxid', 'superkingdom', 'kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species', 'unique_id']],
         on="unique_id",
         how="left"
     )
-    all_gff.drop_duplicates(subset=['start', 'end', "seqid"]).to_csv(os.path.join(output, "results.txt"), sep="\t", index=False)
+    all_gff.drop_duplicates(subset=['start', 'end', "seqid"]).write_csv(os.path.join(output, "results.txt"), separator="\t", include_header=False)
 
     # Domain, ncRNA, and genomad will be handled in next message due to length limits. Shall I continue with those chunks now?
     results = {
@@ -169,8 +169,8 @@ def run_arranger(
     }
 
     # ─────────── Domains ───────────
-    if domains and domains_data is not None and not domains_data.empty:
-        domains_data = domains_data.merge(
+    if domains and domains_data is not None and domains_data.height > 0:
+        domains_data = domains_data.join(
             all_gff[["id", "rel_start", "rel_end", "flip_strand", "y"]],
             left_on="protein_id",
             right_on="id",
@@ -206,11 +206,11 @@ def run_arranger(
         domains_data["coordinates"] = [[list(zip(x, y))] for x, y in zip(domains_data["xs"], domains_data["ys"])]
         domains_data = domains_data[domains_data["y_pos"] < 2]
         domains_data["e_value"] = tmp_evals.astype(str)
-        domains_data.to_csv(os.path.join(output, "domains.txt"), sep="\t", index=False)
+        domains_data.write_csv(os.path.join(output, "domains.txt"), separator="\t", include_header=False)
         results["domains_data"] = domains_data
 
     # ─────────── ncRNA ───────────
-    if nc_data is not None and not nc_data.empty:
+    if nc_data is not None and nc_data.height > 0:
         nc_data["rel_start"] = nc_data["start"] - nc_data["start_target"]
         nc_data["rel_end"] = nc_data["end"] - nc_data["start_target"]
         nc_data["delta"] = nc_data["end_target"] - nc_data["start_target"]
@@ -244,18 +244,18 @@ def run_arranger(
         )]
         nc_data["coordinates"] = [[list(zip(x, y))] for x, y in zip(nc_data["xs"], nc_data["ys"])]
 
-        families = nc_data["nc_feature"].dropna().unique().tolist()
+        families = nc_data["nc_feature"].drop_nulls().unique().to_list()
         colors_rgb = [plt.cm.rainbow(random.random()) for _ in families]
         colors_dic = {f: desaturate(list(c), 0.6, 1) for f, c in zip(families, colors_rgb)}
         nc_data["fillcolor"] = nc_data["nc_feature"].map(colors_dic).apply(
             lambda d: d if isinstance(d, list) else [230, 230, 230, 255]
         )
 
-        nc_data.to_csv(os.path.join(output, "ncdata.txt"), sep="\t", index=False)
+        nc_data.write_csv(os.path.join(output, "ncdata.txt"), separator="\t", include_header=False)
         results["nc_data"] = nc_data
 
     # ─────────── GenoMAD ───────────
-    if genomad and genomad_df is not None and not genomad_df.empty:
+    if genomad and genomad_df is not None and genomad_df.height > 0:
         genomad_df["rel_start"] = genomad_df["start"] - genomad_df["start_target"]
         genomad_df["rel_end"] = genomad_df["end"] - genomad_df["start_target"]
         genomad_df["delta"] = genomad_df["end_target"] - genomad_df["start_target"]
@@ -279,7 +279,7 @@ def run_arranger(
             "virus": [244, 162, 97, 255]
         })
 
-        genomad_df.to_csv(os.path.join(output, "genomad.txt"), sep="\t", index=False)
+        genomad_df.write_csv(os.path.join(output, "genomad.txt"), separator="\t", include_header=False)
         results["genomad_df"] = genomad_df
 
     return results

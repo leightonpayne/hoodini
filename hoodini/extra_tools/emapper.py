@@ -1,13 +1,13 @@
 import os
 import subprocess
-import pandas as pd
+import polars as pl
 from hoodini.utils.core import console
 from importlib.resources import files
 from pathlib import Path
 from shutil import copyfile
 import polars as pl
 
-def run_emapper(all_prots: pd.DataFrame, output: str, num_threads: int = 1) -> pd.DataFrame:
+def run_emapper(all_prots: pl.DataFrame, output: str, num_threads: int = 1) -> pl.DataFrame:
     """
     Run mmseqs easy-search, pick best hit per query directly in Polars,
     join to eggNOG metadata, pick the deepest OG per query,
@@ -28,7 +28,7 @@ def run_emapper(all_prots: pd.DataFrame, output: str, num_threads: int = 1) -> p
             copyfile(fasta_fallback, fasta_path)
             console.print(f"[dim]Copied {fasta_fallback} -> {fasta_path}[/dim]")
         else:
-            seq_df = all_prots[["id", "sequence"]].dropna().drop_duplicates("id")
+            seq_df = all_prots[["id", "sequence"]].drop_nulls().drop_duplicates("id")
             seq_df.to_fasta("id", "sequence", fasta_path)
             console.print(f"[green]✔ Generated {fasta_path}[/green]")
 
@@ -72,7 +72,7 @@ def run_emapper(all_prots: pd.DataFrame, output: str, num_threads: int = 1) -> p
 
     if not os.path.exists(results_m8):
         console.print(f"[bold yellow]Warning: mmseqs results not found at {results_m8}[/bold yellow]")
-        return pd.DataFrame()
+        return pl.DataFrame()
 
     # --- Polars pipeline: read full m8 and pick best hit per query ---
     hits_all = pl.read_csv(
@@ -133,7 +133,6 @@ def run_emapper(all_prots: pd.DataFrame, output: str, num_threads: int = 1) -> p
     console.print(deepest.head(10))
     console.print(f"shape: {deepest.shape}")
 
-    merged_df = deepest.to_pandas()
-    console.print(f"[green]✔ mmseqs annotations ready: {len(merged_df)} queries annotated[/green]")
-    return merged_df
+    console.print(f"[green]✔ mmseqs annotations ready: {deepest.height} queries annotated[/green]")
+    return deepest
 

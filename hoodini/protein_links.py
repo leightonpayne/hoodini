@@ -1,27 +1,29 @@
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
+import polars as pl
 
 from hoodini.utils.logging_utils import console
 
 
-def run_protein_links(output_dir: str, all_prots: pd.DataFrame, threads: int = 4, evalue: float = 1e-5) -> pd.DataFrame:
+def run_protein_links(output_dir: str, all_prots: pl.DataFrame, threads: int = 4, evalue: float = 1e-5) -> pl.DataFrame:
     """Build Diamond DB from `all_prots` (DataFrame) and run all-vs-all blastp.
 
     Parameters
     - output_dir: base output folder where results.fasta will be read/written
-    - all_prots: DataFrame containing at least columns ['id', 'sequence'] or ['protein_id', 'sequence']
+    - all_prots: polars DataFrame containing at least columns ['id', 'sequence'] or ['protein_id', 'sequence']
     - threads: number of threads for Diamond
     - evalue: evalue cutoff for blastp
 
     Returns
-    - pandas.DataFrame with columns [qseqid, sseqid, pident, length, evalue, bitscore]
+    - polars.DataFrame with columns [qseqid, sseqid, pident, length, evalue, bitscore]
       with self-hits removed (same genome prefix in qseqid and sseqid).
     """
     # Find sequence column names
-    df = all_prots.copy()
+    df = all_prots.clone()
     if 'sequence' not in df.columns:
         raise ValueError("all_prots must contain a 'sequence' column")
 
@@ -42,33 +44,57 @@ def run_protein_links(output_dir: str, all_prots: pd.DataFrame, threads: int = 4
     if not fasta_path.exists():
         console.print(f"Writing protein FASTA to {fasta_path}")
         with open(fasta_path, 'w') as fh:
-            for _, r in df.iterrows():
-                fh.write(f">{r[id_col]}\n")
-                seq = r['sequence']
+            for row in df.iter_rows(named=True):
+                fh.write(f">{row[id_col]}\n")
+                seq = row['sequence']
                 # wrap at 80 chars
                 for i in range(0, len(seq), 80):
                     fh.write(seq[i:i+80] + "\n")
 
-    # Try to import Diamond wrapper
-    try:
-        from diamondonpy import Diamond
-    except Exception as e:
-        raise RuntimeError("diamondonpy Diamond wrapper not available; please install diamondonpy") from e
-
-    diamond = Diamond()
-
+    # Build Diamond database
     console.print("Building Diamond database...")
-    diamond.makedb(db=str(db_path), input_file=str(fasta_path), threads=threads)
+    makedb_cmd = [
+        "diamond", "makedb",
+        "--in", str(fasta_path),
+        "--db", str(db_path),
+        "--threads", str(threads)
+    ]
+    subprocess.run(makedb_cmd, check=True, capture_output=True)
     console.print(f"Diamond database built: {db_path}")
+    # Run Diamond blastp
 
     console.print("Running all-vs-all blastp (Diamond)...")
-    results_df = diamond.blastp(
-        db=str(db_path),
-        query=str(fasta_path),
-        evalue=evalue,
-        threads=threads,
-        outfmt="6 qseqid sseqid pident length evalue bitscore"
-    )
+    with tempfile.NamedTemporaryFile(mode='w+', suffix='.tsv', delete=False) as tmp_out:
+        blastp_cmd = [
+            "diamond", "blastp",
+            "--db", str(db_path),
+            "--query", str(fasta_path),
+            "--out", tmp_out.name,
+            "--outfmt", "6", "qseqid", "sseqid", "pident", "length", "evalue", "bitscore",
+            "--evalue", str(evalue),
+            "--threads", str(threads)
+        ]
+        subprocess.run(blastp_cmd, check=True, capture_output=True)
+        
+        # Read Diamond results
+        try:
+            results_df = pl.read_csv(
+                tmp_out.name,
+                separator='\t',
+                has_header=False,
+                new_columns=["qseqid", "sseqid", "pident", "length", "evalue", "bitscore"]
+            )
+        except Exception:
+            results_df = pl.DataFrame(schema={
+                "qseqid": pl.Utf8,
+                "sseqid": pl.Utf8,
+                "pident": pl.Float64,
+                "length": pl.Int64,
+                "evalue": pl.Float64,
+                "bitscore": pl.Float64
+            })
+        finally:
+            Path(tmp_out.name).unlink(missing_ok=True)
 
     # Remove DB file(s)
     try:
@@ -77,21 +103,19 @@ def run_protein_links(output_dir: str, all_prots: pd.DataFrame, threads: int = 4
     except Exception:
         console.print(f"[yellow]warning[/yellow] could not remove diamond DB {db_path}")
 
-    # Ensure DataFrame columns and types
-    expected = ['qseqid', 'sseqid', 'pident', 'length', 'evalue', 'bitscore']
-    if not all(c in results_df.columns for c in expected):
-        # Attempt to coerce if blastp returned a list
-        results_df = pd.DataFrame(results_df, columns=expected)
+    if results_df.height == 0:
+        console.print("No protein pairwise comparisons found")
+        return results_df
 
     # Exclude self-hits based on genome prefix before the first '|'
-    def same_genome(a: str, b: str) -> bool:
-        try:
-            return a.split("|")[0] == b.split("|")[0]
-        except Exception:
-            return a == b
+    # Extract genome prefix from qseqid and sseqid
+    results_df = results_df.with_columns([
+        pl.col("qseqid").str.split("|").list.first().alias("qgenome"),
+        pl.col("sseqid").str.split("|").list.first().alias("sgenome")
+    ])
+    
+    # Filter out rows where genomes are the same
+    filtered = results_df.filter(pl.col("qgenome") != pl.col("sgenome")).drop(["qgenome", "sgenome"])
 
-    mask = results_df.apply(lambda row: same_genome(row['qseqid'], row['sseqid']), axis=1)
-    filtered = results_df[~mask].reset_index(drop=True)
-
-    console.print(f"Protein pairwise comparisons complete: {len(filtered)} hits (self-hits removed)")
+    console.print(f"Protein pairwise comparisons complete: {filtered.height} hits (self-hits removed)")
     return filtered

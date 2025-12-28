@@ -1,4 +1,4 @@
-import pandas as pd
+import polars as pl
 import zlib
 import base64
 import json
@@ -7,19 +7,19 @@ from importlib.resources import files
 from hoodini.utils.core import console
 
 def run_extra_plotter(
-    all_gff: pd.DataFrame,
-    den_data: pd.DataFrame,
-    dendrogram: pd.DataFrame,
-    nc_data: pd.DataFrame,
-    records: pd.DataFrame,
+    all_gff: pl.DataFrame,
+    den_data: pl.DataFrame,
+    dendrogram: pl.DataFrame,
+    nc_data: pl.DataFrame,
+    records: pl.DataFrame,
     output: str,
-    domains_data: pd.DataFrame = pd.DataFrame(),
-    genomad_df: pd.DataFrame = pd.DataFrame(),
+    domains_data: pl.DataFrame = pl.DataFrame(),
+    genomad_df: pl.DataFrame = pl.DataFrame(),
     columns: list = None,
     include_domains: bool = False,
     include_genomad: bool = False,
-    ticks: pd.DataFrame = pd.DataFrame(),
-    tick_text: pd.DataFrame = pd.DataFrame(),
+    ticks: pl.DataFrame = pl.DataFrame(),
+    tick_text: pl.DataFrame = pl.DataFrame(),
 ):
     all_gff = all_gff.copy()
     den_data = den_data.copy()
@@ -31,46 +31,49 @@ def run_extra_plotter(
                    "species", "genus", "family", "order", "class", "phylum", "kingdom", 
                    "superkingdom", "prevalence"]
 
-    all_gff["temp"] = all_gff["assembly_id"].str.split(".").str[0]
-
     all_gff = all_gff[columns]
     # Merge leaf labels into den_data
-    den_data = pd.merge(
-        den_data,
+    den_data = den_data.join(
         records[["assembly_id", "unique_id"]],
-        left_on="leaf_labels", right_on="unique_id", how="left"
-    ).drop(columns=["unique_id"])
-    
-    den_data["temp"] = den_data["assembly_id"].str.split(".").str[0]
-    den_data['bckg_color'] = [[255, 228, 184, 255]] * len(den_data)
+        left_on="leaf_labels",
+        right_on="unique_id",
+        how="left",
+    ).drop(["unique_id"])
+
+    den_data = den_data.with_columns(
+        [
+            pl.col("assembly_id").str.split(".").list.first().alias("temp"),
+            pl.lit([255, 228, 184, 255]).alias("bckg_color"),
+        ]
+    )
 
     if not include_domains:
-        domains_data = pd.DataFrame()
+        domains_data = pl.DataFrame()
 
     if not include_genomad:
-        genomad_df = pd.DataFrame()
+        genomad_df = pl.DataFrame()
 
     os.makedirs(os.path.join(output, "plotdata"), exist_ok=True)
     # Write all outputs to CSV
-    all_gff.to_csv(f"{output}/plotdata/all_gff.csv", index=False, encoding="utf-8")
-    dendrogram.to_csv(f"{output}/plotdata/dendrogram.csv", index=False, encoding="utf-8")
-    den_data.to_csv(f"{output}/plotdata/den_data.csv", index=False, encoding="utf-8")
-    ticks.to_csv(f"{output}/plotdata/ticks.csv", index=False, encoding="utf-8")
-    tick_text.to_csv(f"{output}/plotdata/tick_text.csv", index=False, encoding="utf-8")
-    domains_data.to_csv(f"{output}/plotdata/domains.csv", index=False, encoding="utf-8")
-    genomad_df.to_csv(f"{output}/plotdata/genomad.csv", index=False, encoding="utf-8")
-    nc_data.to_csv(f"{output}/plotdata/nc_data.csv", index=False, encoding="utf-8")
+    all_gff.write_csv(f"{output}/plotdata/all_gff.csv", include_header=False, encoding="utf-8")
+    dendrogram.write_csv(f"{output}/plotdata/dendrogram.csv", include_header=False, encoding="utf-8")
+    den_data.write_csv(f"{output}/plotdata/den_data.csv", include_header=False, encoding="utf-8")
+    ticks.write_csv(f"{output}/plotdata/ticks.csv", include_header=False, encoding="utf-8")
+    tick_text.write_csv(f"{output}/plotdata/tick_text.csv", include_header=False, encoding="utf-8")
+    domains_data.write_csv(f"{output}/plotdata/domains.csv", include_header=False, encoding="utf-8")
+    genomad_df.write_csv(f"{output}/plotdata/genomad.csv", include_header=False, encoding="utf-8")
+    nc_data.write_csv(f"{output}/plotdata/nc_data.csv", include_header=False, encoding="utf-8")
 
     # Serialize all to CSV strings and compress
     csvdata = {
-        "results": all_gff.to_csv(index=False),
-        "dendrogram": dendrogram.to_csv(index=False),
-        "dend_data": den_data.to_csv(index=False),
-        "ticks": ticks.to_csv(index=False),
-        "tick_text": tick_text.to_csv(index=False),
-        "domains": domains_data.to_csv(index=False),
-        "genomad": genomad_df.to_csv(index=False),
-        "nc_data": nc_data.to_csv(index=False),
+        "results": all_gff.write_csv(include_header=False),
+        "dendrogram": dendrogram.write_csv(include_header=False),
+        "dend_data": den_data.write_csv(include_header=False),
+        "ticks": ticks.write_csv(include_header=False),
+        "tick_text": tick_text.write_csv(include_header=False),
+        "domains": domains_data.write_csv(include_header=False),
+        "genomad": genomad_df.write_csv(include_header=False),
+        "nc_data": nc_data.write_csv(include_header=False),
     }
 
     jsondata = json.dumps(csvdata)

@@ -29,29 +29,28 @@ def extract_neighborhood(
         if not os.path.exists(gbf_file):
             return None, None, unique_id, "GenBank file not found"  # Return None and index for failed extractions
             
-        # Load the GenBank records
+        # Stream GenBank records to avoid loading everything in memory
         try:
-            records = gb_io.load(gbf_file)
-        except:
-            return None, None, unique_id, "gb_io failed to load GenBank file"
-        
+            record_iter = gb_io.iter(gbf_file)
+        except Exception:
+            return None, None, unique_id, "gb_io failed to open GenBank iterator"
+
         if nucleotide_id:
-            # Process all CDS features in the record(s)
+            # Iterate records and stop when version matches the target nucleotide_id
             record_found = False
-            for record in records:
-                #iterate over records and stop when record version matches nucleotide_id
+            for record in record_iter:
                 record_version = getattr(record, 'version', None)
-                if nucleotide_id in record.version:
+                if record_version and nucleotide_id in record_version:
                     record_found = True
                     break
         if record_found:
             feature_data = process_features(record.features, record_version)
-            feature_data = pd.DataFrame(feature_data)
+            feature_data = pl.DataFrame(feature_data)
             if "attributes" in feature_data.columns:
-                attributes_df = pd.DataFrame(feature_data['attributes'].tolist())
-                attributes_df.drop(columns=['protein_id'], inplace=True)
-                feature_data = pd.concat([feature_data.drop(columns=['attributes']), attributes_df], axis=1)
-                feature_data.rename(columns={"translation":"sequence"},inplace=True)
+                attributes_df = pl.DataFrame(feature_data['attributes'].to_list())
+                attributes_df.drop(['protein_id'])
+                feature_data = pl.concat([feature_data.drop(['attributes']), attributes_df], how="horizontal")
+                feature_data = feature_data.rename({"translation": "sequence"})
             else:
                 return None, None, unique_id, "GenBank file is not annotated"
         else:
@@ -79,7 +78,7 @@ def extract_neighborhood(
             elif mode == "win_ngen":
                 subgff = feature_data.reset_index(drop=True)
                 #get the index of the row in which protein_id matches the input protein_id
-                prot_index = subgff[subgff["protein_id"] == protein_id].index.tolist()[0]
+                prot_index = subgff[subgff["protein_id"] == protein_id].index.to_list()[0]
                 subgff = subgff[prot_index-window:prot_index+window]
                 start_win = subgff["start"].min()
                 end_win = subgff["end"].max()
@@ -99,8 +98,8 @@ def extract_neighborhood(
                 elif mode == "win_ngen":
                     subgff = feature_data.reset_index(drop=True)
                     #get the index of the first and last feature in the subgff dataframe between start and end
-                    start_index = subgff[subgff["start"] >= start].index.tolist()[0]
-                    end_index = subgff[subgff["end"] <= end].index.tolist()[-1]
+                    start_index = subgff[subgff["start"] >= start].index.to_list()[0]
+                    end_index = subgff[subgff["end"] <= end].index.to_list()[-1]
                     #get start_index - window and end_index + window
                     subgff = subgff[start_index-window:end_index+window]
                     start_win = subgff["start"].min()
@@ -152,10 +151,10 @@ def extract_neighborhood(
             orf_finder = pyrodigal.GeneFinder(meta=True,min_gene=10, max_overlap=9)
             new_genes = []
 
-            for i,pred in enumerate(orf_finder.find_genes(record.sequence[start_win:end_win].decode("utf-8"))):
+            for i, pred in enumerate(orf_finder.find_genes(record.sequence[start_win:end_win].decode("utf-8"))):
                 overlap_flag = False
-                for index, row in subgff.iterrows():
-                    overlap_percentage = calculate_overlap(row['start'], row['end'], pred.begin+start_win, pred.end+start_win)
+                for row in subgff.iter_rows(named=True):
+                    overlap_percentage = calculate_overlap(row['start'], row['end'], pred.begin + start_win, pred.end + start_win)
                     if overlap_percentage > 10:
                         overlap_flag = True
                         break
@@ -176,16 +175,16 @@ def extract_neighborhood(
                     
             # Convert new genes to DataFrame and concatenate with existing subgff
             if new_genes:
-                new_genes_df = pd.DataFrame(new_genes)
-                subgff = pd.concat([subgff, new_genes_df], ignore_index=True) 
+                new_genes_df = pl.DataFrame(new_genes)
+                subgff = pl.concat([subgff, new_genes_df], how="vertical") 
                 
                 
             new_genes = []
             seq = record.sequence[start_win:end_win].decode("utf-8").upper()
             for i, (start, stop, strand, description) in enumerate(orfipy_core.orfs(seq, minlen=100, maxlen=1000, partial3=False, between_stops=False)):
                 overlap_flag = False
-                for index, row in subgff.iterrows():
-                    overlap_percentage = calculate_overlap(row['start'], row['end'], start+start_win, stop+start_win)
+                for row in subgff.iter_rows(named=True):
+                    overlap_percentage = calculate_overlap(row['start'], row['end'], start + start_win, stop + start_win)
                     if overlap_percentage > 0:
                         overlap_flag = True
                         break
@@ -213,10 +212,10 @@ def extract_neighborhood(
                     }) 
             
             if new_genes:
-                new_genes_df = pd.DataFrame(new_genes)
-                subgff = pd.concat([subgff, new_genes_df], ignore_index=True)
+                new_genes_df = pl.DataFrame(new_genes)
+                subgff = pl.concat([subgff, new_genes_df], how="vertical")
                 
-        neighborhood = pd.DataFrame(neighborhood, index=[0])
+        neighborhood = pl.DataFrame(neighborhood, index=[0])
         
     elif gff_file and faa_file:
         
@@ -232,7 +231,7 @@ def extract_neighborhood(
 
         # Read GFF and FAA files
         try:
-            gff = pd.read_csv(filepath_or_buffer=gff_file, sep="\t", comment="#", names=gff_header, engine="c")
+            gff = pl.read_csv(filepath_or_buffer=gff_file, separator="\t", comment="#", names=gff_header, engine="c")
         except:
             return None, None, unique_id, "Failed to read GFF file"
         try:
@@ -245,14 +244,14 @@ def extract_neighborhood(
         if input_type == "protein":
             if protein_id and window:
                 query = f"={protein_id}"
-                start = gff[gff['attributes'].str.contains(query)]["start"].tolist()
+                start = gff[gff['attributes'].str.contains(query)]["start"].to_list()
                 if not start:
                     return None, None, unique_id, "Protein not found in GFF file"
                 else:
                     start = start[0]
-                end = gff[gff['attributes'].str.contains(query)]["end"].tolist()[0]
-                strand = gff[gff['attributes'].str.contains(query)]["strand"].tolist()[0]
-                nucleotide_id = gff[gff['attributes'].str.contains(query)]["seqid"].tolist()[0]
+                end = gff[gff['attributes'].str.contains(query)]["end"].to_list()[0]
+                strand = gff[gff['attributes'].str.contains(query)]["strand"].to_list()[0]
+                nucleotide_id = gff[gff['attributes'].str.contains(query)]["seqid"].to_list()[0]
                 
                 if mode == "win_nts":
                     start_win = start - window
@@ -265,7 +264,7 @@ def extract_neighborhood(
                     subgff = gff.query("seqid == @nucleotide_id & type =='CDS' & start>=@start_win & end<=@end_win")
                 elif mode == "win_ngen":
                     subgff = gff.query("seqid == @nucleotide_id & type =='CDS'").reset_index(drop=True)
-                    prot_index = subgff[subgff['attributes'].str.contains(query)].index.tolist()[0]
+                    prot_index = subgff[subgff['attributes'].str.contains(query)].index.to_list()[0]
                     subgff = subgff[prot_index-window:prot_index+window]
                     start_win = subgff["start"].min()
                     end_win = subgff["end"].max()
@@ -288,7 +287,7 @@ def extract_neighborhood(
                     subgff = gff.query("seqid == @nucleotide_id & type =='CDS' & start>=@start_win & end<=@end_win")
                 elif mode == "win_ngen":
                     subgff = gff.query("seqid == @nucleotide_id & type =='CDS'").reset_index(drop=True)
-                    prot_index = subgff[subgff['attributes'].str.contains(query)].index.tolist()[0]
+                    prot_index = subgff[subgff['attributes'].str.contains(query)].index.to_list()[0]
                     subgff = subgff[prot_index-window:prot_index+window]
                     start_win = subgff["start"].min()
                     end_win = subgff["end"].max()
@@ -332,7 +331,7 @@ def extract_neighborhood(
         else:
             key_join = "ID"
         
-        subgff = pd.merge(subgff, faa_df[["id", "sequence"]], left_on=key_join, right_on='id', how="left")
+        subgff = subgff.join(faa_df[["id", "sequence"]], left_on=key_join, right_on='id', how="left")
         
         
             
@@ -341,8 +340,8 @@ def extract_neighborhood(
             nucleotide_id = str(nucleotide_id)
             faa_df["id"] = faa_df["id"].astype(str)
             #check if nucleotide id in fna_df["id"]
-            if nucleotide_id in fna_df["id"].tolist():
-                sequence = fna_df[fna_df["id"] == nucleotide_id]["sequence"].tolist()[0]
+            if nucleotide_id in fna_df["id"].to_list():
+                sequence = fna_df[fna_df["id"] == nucleotide_id]["sequence"].to_list()[0]
                 end_win = end + window
                 if end_win > len(sequence):
                     end_win = len(sequence)
@@ -351,9 +350,9 @@ def extract_neighborhood(
                     orf_finder = pyrodigal.GeneFinder(meta=True)
                     new_genes = []
 
-                    for i,pred in enumerate(orf_finder.find_genes(sequence.encode())):
+                    for i, pred in enumerate(orf_finder.find_genes(sequence.encode())):
                         overlap_flag = False
-                        for index, row in subgff.iterrows():
+                        for row in subgff.iter_rows(named=True):
                             overlap_percentage = calculate_overlap(row['start'], row['end'], pred.begin, pred.end)
                             if overlap_percentage > 5:
                                 overlap_flag = True
@@ -375,8 +374,8 @@ def extract_neighborhood(
 
                     # Convert new genes to DataFrame and concatenate with existing subgff
                     if new_genes:
-                        new_genes_df = pd.DataFrame(new_genes)
-                        subgff = pd.concat([subgff, new_genes_df], ignore_index=True)  
+                        new_genes_df = pl.DataFrame(new_genes)
+                        subgff = pl.concat([subgff, new_genes_df], how="vertical")  
         else:
             #wnd win should be the end of the last ORF in the window
             sequence = None
@@ -390,7 +389,7 @@ def extract_neighborhood(
             "sequence": sequence[start_win:end_win],
             "unique_id": unique_id,
         }
-        neighborhood = pd.DataFrame(neighborhood, index=[0])
+        neighborhood = pl.DataFrame(neighborhood, index=[0])
 
 
     subgff["target_prot"] = protein_id
@@ -399,7 +398,7 @@ def extract_neighborhood(
     
     # Normalize identifier columns so callers always see a single canonical 'id'
     try:
-        if isinstance(subgff, pd.DataFrame):
+        if isinstance(subgff, pl.DataFrame):
             if 'id' not in subgff.columns:
                 for cand in ('protein_id', 'ID', 'gene_id'):
                     if cand in subgff.columns:
@@ -409,7 +408,7 @@ def extract_neighborhood(
             for redundant in ('ID', 'gene_id'):
                 if redundant in subgff.columns and redundant != 'id':
                     try:
-                        subgff.drop(columns=[redundant], inplace=True)
+                        subgff.drop([redundant])
                     except Exception:
                         pass
 

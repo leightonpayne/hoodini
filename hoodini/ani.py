@@ -4,15 +4,15 @@ from pathlib import Path
 import io
 from typing import Optional
 
-import pandas as pd
+import polars as pl
 
 from hoodini.utils.logging_utils import console
 
 
-def _write_fasta_from_df(df: pd.DataFrame, out_path: Path, id_col: str = 'temp_seqid', seq_col: str = 'sequence') -> None:
+def _write_fasta_from_df(df: pl.DataFrame, out_path: Path, id_col: str = 'temp_seqid', seq_col: str = 'sequence') -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, 'w') as fh:
-        for _, r in df.iterrows():
+        for r in df.iter_rows(named=True):
             hdr = str(r.get(id_col, '')).strip()
             seq = str(r.get(seq_col, '')).strip()
             if not hdr or not seq:
@@ -22,7 +22,7 @@ def _write_fasta_from_df(df: pd.DataFrame, out_path: Path, id_col: str = 'temp_s
                 fh.write(seq[i:i+80] + "\n")
 
 
-def run_ani(output_dir: str, all_neigh: Optional[pd.DataFrame] = None, threads: int = 8, evalue: Optional[float] = None, mode: str = "fastani") -> pd.DataFrame:
+def run_ani(output_dir: str, all_neigh: Optional[pl.DataFrame] = None, threads: int = 8, evalue: Optional[float] = None, mode: str = "fastani") -> pl.DataFrame:
     """Run pairwise ANI using either `skani` or `fastANI` and return a skani-like DataFrame.
 
     Parameters
@@ -59,20 +59,22 @@ def run_ani(output_dir: str, all_neigh: Optional[pd.DataFrame] = None, threads: 
         with open(skani_log, 'r') as logfh:
             out_text = logfh.read()
         # Parse skani output
-        df = pd.read_csv(io.StringIO(out_text), sep='\t', header=0)
+        df = pl.read_csv(io.StringIO(out_text), separator='\t', header=0)
         # Expected columns include Ref_name, Query_name, ANI, Align_fraction_ref, Align_fraction_query
         # Normalize column names and ensure both align fraction columns exist
         if 'Align_fraction_query' not in df.columns and 'Align_fraction_ref' in df.columns:
             # sometimes skani repeats the same column; create a symmetric placeholder
             df['Align_fraction_query'] = df['Align_fraction_ref']
-        df['Ref_name'] = df['Ref_name'].apply(lambda x: str(x).split('/')[-1])
-        df['Query_name'] = df['Query_name'].apply(lambda x: str(x).split('/')[-1])
+        df = df.with_columns([
+            pl.col('Ref_name').str.split('/').list.last().alias('Ref_name'),
+            pl.col('Query_name').str.split('/').list.last().alias('Query_name'),
+        ])
         # Ensure numeric conversions
-        df['ANI'] = pd.to_numeric(df['ANI'], errors='coerce')
-        df['Align_fraction_ref'] = pd.to_numeric(df.get('Align_fraction_ref'), errors='coerce')
-        df['Align_fraction_query'] = pd.to_numeric(df.get('Align_fraction_query'), errors='coerce')
-        df = df[df['Ref_name'] != df['Query_name']]
-        return df[['Ref_name', 'Query_name', 'ANI', 'Align_fraction_ref', 'Align_fraction_query']]
+        for col in ['ANI', 'Align_fraction_ref', 'Align_fraction_query']:
+            if col in df.columns:
+                df = df.with_columns(pl.col(col).cast(pl.Float64, allow_nulls=True))
+        df = df.filter(pl.col('Ref_name') != pl.col('Query_name'))
+        return df.select(['Ref_name', 'Query_name', 'ANI', 'Align_fraction_ref', 'Align_fraction_query'])
 
     elif mode.lower() == 'fastani':
         # split multi-fasta into individual genome files
@@ -112,13 +114,13 @@ def run_ani(output_dir: str, all_neigh: Optional[pd.DataFrame] = None, threads: 
         if not fastani_output.exists():
             raise FileNotFoundError(f"fastANI did not produce expected output at {fastani_output}")
 
-        df = pd.read_csv(fastani_output, sep='\t', header=None,
+        df = pl.read_csv(fastani_output, separator='\t', header=None,
                          names=['query', 'reference', 'ani', 'frags_matched', 'frags_total_query'])
 
         reverse_frag_total = df.set_index(['reference', 'query'])['frags_total_query'].to_dict()
 
         rows = []
-        for _, row in df.iterrows():
+        for row in df.iter_rows(named=True):
             q = row['query']
             r = row['reference']
             ani = row['ani']
@@ -138,7 +140,7 @@ def run_ani(output_dir: str, all_neigh: Optional[pd.DataFrame] = None, threads: 
                 'Align_fraction_query': float(align_fraction_query) * 100.0
             })
 
-        skani_like_df = pd.DataFrame(rows)
+        skani_like_df = pl.DataFrame(rows)
         # remove self-hits
         skani_like_df = skani_like_df[skani_like_df['Ref_name'] != skani_like_df['Query_name']]
 
@@ -147,7 +149,7 @@ def run_ani(output_dir: str, all_neigh: Optional[pd.DataFrame] = None, threads: 
             a, b = row['Ref_name'], row['Query_name']
             return tuple(sorted((a, b)))
 
-        skani_like_df['pair_key'] = skani_like_df.apply(pair_key, axis=1)
+        skani_like_df['pair_key'] = skani_like_df.apply(pair_key, how="horizontal")
 
         # For reciprocal pairs (A,B) and (B,A) compute average ANI and average align fractions
         agg = skani_like_df.groupby('pair_key').agg({

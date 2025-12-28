@@ -36,6 +36,7 @@ dependencies:
   - entrez-direct
   - aria2
   - pigz
+  - blast
   - pip:
       - pyhmmer
       - diamondonpy
@@ -51,3 +52,4 @@ dependencies:
       - jinja2
       - mdmparis-defense-finder
       - mappy
+

@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
+import polars as pl
 import rich_click as click
 import tomli
 from rich.logging import RichHandler
@@ -140,7 +140,7 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
     config = ConfigObj(merged_params)
     
     config.ani_mode = config.ani_mode if config.tree_mode == "ani_tree" else None
-    config.nt_aln_mode = config.nt_aln_mode if config.nt_links else None
+    config.nt_aln_mode = config.nt_aln_mode if (config.nt_links or config.tree_mode == "ani_tree") else None
     
     if not config.input_path and not config.inputsheet:
         raise click.UsageError("One of '--input' or '--inputsheet' must be provided.")
@@ -180,7 +180,6 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
     result = run_assembly_parser(
         records_df=records,
         output_dir=config.output,
-        assembly_folder=config.assembly_folder,
         ncrna=config.ncrna,
         cctyper=config.cctyper,
         genomad=config.genomad,
@@ -206,7 +205,7 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
     
     
     # ─── Step 4: Getting protein links ──────────
-    
+    print(config.tree_mode)
     # if --tree-mode is aai or --prot-links is set to True
     if config.tree_mode == "aai_tree" or config.prot_links:
         
@@ -233,7 +232,7 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
 
         # Use the unified pairwise NT runner which supports blastn and fastANI flows.
         from hoodini.pairwise_nt import run_pairwise_nt
-        
+        print(config.nt_aln_mode)        
         pairwise_ani, nt_links = run_pairwise_nt(
             all_neigh=all_neigh,
             all_gff=all_gff,
@@ -264,8 +263,10 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
         sorfs=config.sorfs
     )
     
+    print(all_prots)
+    
     if config.sorfs:
-        discarded_sorfs = all_prots[(all_prots["id"].str.contains("sORF") & all_prots["fam_cluster"].isnull())]
+        discarded_sorfs = all_prots[(all_prots["id"].str.contains("sORF") & all_prots["fam_cluster"].is_null())]
         discarded_sorfs["gff_id"] = "ID=" + discarded_sorfs["id"]
         all_prots = all_prots[~all_prots["id"].isin(discarded_sorfs["id"].unique())]
         #remove all gff in which attributes contains discarded_orfs
@@ -311,6 +312,7 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
         tree_mode=config.tree_mode,
         tree_file=config.tree_file,
         num_threads=config.num_threads,
+        valid_uids=valid_uids,
         aai_mode=config.aai_mode,
         ani_mode=config.ani_mode,
         aai_subset_mode=config.aai_subset_mode,
@@ -334,8 +336,8 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
         
         from hoodini.extra_tools.blast import run_blast
         blast_data = run_blast(all_neigh, config.output, config.blast, config.num_threads, valid_uids)
-        if not blast_data.empty:
-            gff_df = pd.DataFrame({
+        if blast_data.height > 0:
+            gff_df = pl.DataFrame({
                 "seqid": blast_data["seqid"],
                 "source": "hoodini",
                 "type": "region",
@@ -346,21 +348,21 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
                 "phase": ".",
                 "attributes": "ID=" + blast_data["nc_feature"] + ";"
             })
-            all_gff = pd.concat([all_gff, gff_df], ignore_index=True)
+            all_gff = pl.concat([all_gff, gff_df], how="vertical")
 
     # PADLOC annotation
     if config.padloc:
         from hoodini.extra_tools.padloc import run_padloc
         padloc_df = run_padloc(all_gff, all_prots, config.output, config.num_threads)
-        if not padloc_df.empty:
-            all_prots = all_prots.merge(padloc_df, on="id", how="left")
+        if padloc_df.height > 0:
+            all_prots = all_prots.join(padloc_df, on="id", how="left")
 
     # eggNOG-mapper (emapper) annotation
     if config.emapper:
         from hoodini.extra_tools.emapper import run_emapper
         emapper_df = run_emapper(all_prots, config.output, config.num_threads)
 
-        if not emapper_df.empty:
+        if emapper_df.height > 0:
             # If description present and product missing, fill product with description
             if "description" in emapper_df.columns and "product" in all_prots.columns:
                 desc_map = emapper_df.set_index("id")["description"].to_dict()
@@ -372,24 +374,24 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
 
             # merge other columns; keep emapper column names as-is
             if "id" in emapper_df.columns and "id" in all_prots.columns:
-                all_prots = all_prots.merge(emapper_df, on="id", how="left")
+                all_prots = all_prots.join(emapper_df, on="id", how="left")
 
 
     # DefenseFinder annotation
     if config.deffinder:
         from hoodini.extra_tools.defensefinder import run_defensefinder
         deffinder_df = run_defensefinder(all_gff, all_prots, config.output)
-        if not deffinder_df.empty:
-            all_prots = all_prots.merge(deffinder_df, on="id", how="left")
+        if deffinder_df.height > 0:
+            all_prots = all_prots.join(deffinder_df, on="id", how="left")
 
     # CCTyper annotation
     if config.cctyper:
         from hoodini.extra_tools.cctyper import run_cctyper
         cctyper_df, crispr_df = run_cctyper(all_gff, all_prots, all_neigh, den_data, config.output, config.num_threads, valid_uids)
-        if not cctyper_df.empty:
-            all_prots = all_prots.merge(cctyper_df, on="id", how="left")
-        if not crispr_df.empty:
-            gff_df = pd.DataFrame({
+        if cctyper_df.height > 0:
+            all_prots = all_prots.join(cctyper_df, on="id", how="left")
+        if crispr_df.height > 0:
+            gff_df = pl.DataFrame({
                 "seqid": crispr_df["Contig"],
                 "source": "hoodini",
                 "type": "region",
@@ -401,44 +403,45 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
                 "attributes": "ID=" + crispr_df["nc_feature"] + ";"
             })
             #append to all_gff
-            all_gff = pd.concat([all_gff, gff_df], ignore_index=True)
+            all_gff = pl.concat([all_gff, gff_df], how="vertical")
         
         
     # ncRNA/Infernal annotation
     if config.ncrna:
         from hoodini.extra_tools.ncrna import run_ncrna
         ncrna_data = run_ncrna(all_neigh, den_data, config.output, config.num_threads, valid_uids)
-        if not ncrna_data.empty:
-            gff_df = pd.DataFrame({
-                "seqid": ncrna_data["nucid"],
-                "source": "hoodini",
-                "type": "ncRNA",
-                "start": ncrna_data[["start", "end"]].min(axis=1),
-                "end": ncrna_data[["start", "end"]].max(axis=1),
-                "score": ".",
-                "strand": ncrna_data["strand_ncrna"],
-                "phase": ".",
-                "attributes": "ID=" + ncrna_data["nc_feature"] + ";"
-            })
-            all_gff = pd.concat([all_gff, gff_df], ignore_index=True)
+        if ncrna_data.height > 0:
+            gff_df = ncrna_data.select([
+                pl.col("nucid").alias("seqid"),
+                pl.lit("hoodini").alias("source"),
+                pl.lit("ncRNA").alias("type"),
+                pl.min_horizontal([pl.col("start"), pl.col("end")]).alias("start"),
+                pl.max_horizontal([pl.col("start"), pl.col("end")]).alias("end"),
+                pl.lit(".").alias("score"),
+                pl.col("strand_ncrna").alias("strand"),
+                pl.lit(".").alias("phase"),
+                (pl.lit("ID=") + pl.col("nc_feature") + pl.lit(";")).alias("attributes"),
+            ])
+            all_gff = pl.concat([all_gff, gff_df], how="vertical")
 
     # GenoMAD annotation
     if config.genomad:
         from hoodini.extra_tools.genomad import run_genomad
-        genomad_df = run_genomad(all_neigh, den_data, config.output, config.num_threads, valid_uids)
-        if not genomad_df.empty:
-            gff_df = pd.DataFrame({
-                "seqid": genomad_df["seqid"],
-                "source": "hoodini",
-                "type": "region",
-                "start": genomad_df[["start", "end"]].min(axis=1),
-                "end": genomad_df[["start", "end"]].max(axis=1),
-                "score": ".",
-                "strand": ".Z",
-                "phase": ".",
-                "attributes": "ID=" + genomad_df["mge_type"] + ";"
-            })
-            all_gff = pd.concat([all_gff, gff_df], ignore_index=True)
+        genomad_df = run_genomad(all_neigh, config.output, config.num_threads, valid_uids)
+        print(genomad_df)
+        if genomad_df.height > 0:
+            gff_df = genomad_df.select([
+                pl.col("seqid"),
+                pl.lit("hoodini").alias("source"),
+                pl.lit("region").alias("type"),
+                pl.min_horizontal([pl.col("start"), pl.col("end")]).alias("start"),
+                pl.max_horizontal([pl.col("start"), pl.col("end")]).alias("end"),
+                pl.lit(".").alias("score"),
+                pl.lit(".Z").alias("strand"),
+                pl.lit(".").alias("phase"),
+                (pl.lit("ID=") + pl.col("mge_type") + pl.lit(";")).alias("attributes"),
+            ])
+            all_gff = pl.concat([all_gff, gff_df], how="vertical")
 
         
         
@@ -569,7 +572,7 @@ def nuc2asmlen(input_file, output_file):
         df.write_csv(output_file, separator="\t")
         console.print(f"[green]Saved results to {output_file}[/green]")
     else:
-        sys.stdout.write(df.to_csv(sep="\t", index=False))
+        sys.stdout.write(df.write_csv(separator="\t", include_header=False))
 
 
 @utils.command("prefetch_links")
@@ -588,10 +591,10 @@ def prefetch_links(input_file, output_file, kinds):
     # pass through api_fallback flag
     df = get_prefetched_link_table(accs, kinds=kinds_list)
     if output_file:
-        df.to_csv(output_file, sep="\t", index=False, columns=["assembly_id", "file_type", "link"])
+        df.write_csv(output_file, separator="\t", include_header=False, columns=["assembly_id", "file_type", "link"])
         console.print(f"[green]Saved prefetched links to {output_file}[/green]")
     else:
-        print(df.to_csv(sep="\t", index=False, columns=["assembly_id", "file_type", "link"]))
+        print(df.write_csv(separator="\t", include_header=False, columns=["assembly_id", "file_type", "link"]))
 
 if __name__ == "__main__":
     cli()

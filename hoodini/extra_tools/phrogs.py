@@ -1,6 +1,6 @@
 import os
 import collections
-import pandas as pd
+import polars as pl
 import pyhmmer
 from pyhmmer import easel
 from pyhmmer.plan7 import HMMFile
@@ -21,10 +21,10 @@ def run_phrogs(all_gff, output, num_threads):
             if hit.included:
                 results_phrogs.append(Result(hit.name.decode(), hmm, hit.score, hit.evalue))
     if results_phrogs:
-        df_phrogs = pd.DataFrame(results_phrogs)
+        df_phrogs = pl.DataFrame(results_phrogs)
         df_phrogs = df_phrogs.sort_values(by=["id", "phrog_bitscore"], ascending=False)
-        metadata_df = pd.read_csv(metadata_phrogs, sep="\t", names=["phrog_cat", "phrog", "phrog_gene", "EC"])
-        df_phrogs = df_phrogs.merge(metadata_df[["phrog_cat", "phrog", "phrog_gene"]], on="phrog", how="left")
+        metadata_df = pl.read_csv(metadata_phrogs, separator="\t", names=["phrog_cat", "phrog", "phrog_gene", "EC"])
+        df_phrogs = df_phrogs.join(metadata_df[["phrog_cat", "phrog", "phrog_gene"]], on="phrog", how="left")
         color_map = {
             "DNA, RNA and nucleotide metabolism": [76, 114, 176, 255],
             "connector": [221, 132, 82, 255],
@@ -37,9 +37,9 @@ def run_phrogs(all_gff, output, num_threads):
             "other": [0, 0, 0, 100],
             "unknown function": [0, 0, 0, 100]
         }
-        all_gff = all_gff.merge(df_phrogs, on="id", how="left")
+        all_gff = all_gff.join(df_phrogs, on="id", how="left")
         all_gff["linecolor"] = all_gff.apply(
-            lambda x: color_map.get(x["phrog_cat"], x["linecolor"]) if pd.notna(x["phrog_cat"]) else x["linecolor"],
+            lambda x: color_map.get(x["phrog_cat"], x["linecolor"]) if pl.notna(x["phrog_cat"]) else x["linecolor"],
             axis=1,
         )
     return all_gff

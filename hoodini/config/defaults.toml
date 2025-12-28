@@ -13,7 +13,7 @@ minwin = 2000
 minwin_type = "both"
 
 [tree]
-tree_mode = "fast_nj"
+tree_mode = "fast_ml"
 tree_file = "target_prots.nwk"
 nj_algorithm = "nj"
 
