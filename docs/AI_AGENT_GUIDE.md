@@ -24,7 +24,7 @@ This guide gives coding agents a fast, safe overview of hoodini: architecture, e
 4. Protein all-vs-all (optional): [hoodini/protein_links.py](../hoodini/protein_links.py) → `run_protein_links()`.
 5. Nucleotide pairwise / ANI (optional): [hoodini/pairwise_nt.py](../hoodini/pairwise_nt.py) → `run_pairwise_nt()`.
 6. Cluster neighbor proteins: [hoodini/cluster_proteins.py](../hoodini/cluster_proteins.py) → `cluster_proteins()`.
-7. Proteome similarity (AAI): [hoodini/run_proteome_similarity.py](../hoodini/run_proteome_similarity.py) → `run_proteome_similarity()`.
+7. Proteome similarity (AAI): [hoodini/pipeline/proteome_similarity.py](../src/hoodini/pipeline/proteome_similarity.py) → `run_proteome_similarity()`.
 8. Taxonomy + tree building: [hoodini/taxonomy.py](../hoodini/taxonomy.py) → `parse_taxonomy_and_build_tree()`.
 9. Extra annotations (optional): wrappers in [hoodini/extra_tools](../hoodini/extra_tools) for PADLOC, DefenseFinder, eggNOG-mapper (emapper), GenoMAD, ncRNA/Infernal, CCtyper, domains, PHROGs, anti-defense.
 10. Write unified outputs for visualization: [hoodini/write_data.py](../hoodini/write_data.py) → `write_viz_outputs()`.
@@ -49,8 +49,8 @@ Execution notes:
 
 ## CLI Utilities (`hoodini utils`)
 
-- `nuc2asmlen`: [hoodini/nuc2asmlen.py](../hoodini/nuc2asmlen.py) → assembly/contig length metadata for nuccore/contig accessions.
-- `prefetch_links`: [hoodini/prefetch_links.py](../hoodini/prefetch_links.py) → table of `assembly_id`, `file_type`, `link`.
+- `nuc2asmlen`: [hoodini/pipeline/helpers/nuc2asmlen.py](../src/hoodini/pipeline/helpers/nuc2asmlen.py) → assembly/contig length metadata for nuccore/contig accessions.
+- `prefetch_links`: [hoodini/pipeline/helpers/prefetch_links.py](../src/hoodini/pipeline/helpers/prefetch_links.py) → table of `assembly_id`, `file_type`, `link`.
 
 ## Downloads (`hoodini download`)
 

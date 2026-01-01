@@ -24,7 +24,7 @@ Suggested install steps (adapt channel list to your environment):
 ```bash
 # create and activate environment (example)
 mamba env create -f environment.yml
-# install python-only extras
+# install python-only extras (src-layout)
 pip install -e .
 # download hoodini external databases
 hoodini download databases
@@ -157,10 +157,8 @@ Options for `hoodini run` (all flags may also be present in a TOML config and ar
 - `--genomad` (flag)
    - Run GenoMAD for mobile genetic element identification.
 
-- `--antidefense` (flag)
    - Identify anti-defense (ACR) genes.
 
-- `--phrogs` (flag)
    - Annotate proteins with PHROGs.
 
 - `--sorfs` (flag)

@@ -1,7 +1,7 @@
 import pandas as pd
 import polars as pl
 
-import hoodini.initialize as initialize
+import hoodini.pipeline.initialize as initialize
 
 
 def test_initialize_inputs_deduplicates_and_marks_premade(tmp_path, monkeypatch) -> None:

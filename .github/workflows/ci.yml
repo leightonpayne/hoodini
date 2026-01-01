@@ -32,8 +32,12 @@ jobs:
         run: isort --check-only .
 
       - name: Mypy (lenient, no deps)
-        run: mypy hoodini || true
+        env:
+          PYTHONPATH: src
+        run: mypy src/hoodini || true
 
       - name: Pytest (placeholder)
+        env:
+          PYTHONPATH: src
         run: |
           if [ -d tests ]; then pytest -q; else echo "no tests yet"; fi
