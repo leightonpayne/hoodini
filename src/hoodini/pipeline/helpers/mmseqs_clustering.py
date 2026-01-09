@@ -5,18 +5,18 @@ from pathlib import Path
 
 import polars as pl
 
+from hoodini.utils.logging_utils import error
 
 def _run_command(command):
     result = subprocess.run(command, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"Error executing command: {command}")
-        print(result.stderr)
+        error(f"Error executing command: {command}")
+        error(result.stderr)
         sys.exit(1)
     return result.stdout
 
 
 def read_output_to_df(output_file):
-    # Function to read the output file into a DataFrame
     df = pl.read_csv(output_file, separator="\t", header=None)
     return df
 

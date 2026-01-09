@@ -20,7 +20,6 @@ def _df_to_fasta(self: pl.DataFrame, id_col: str, seq_col: str, path: str | Path
     to_fasta(self, id_col, seq_col, path)
 
 
-# Monkey patch for convenience (matches previous API usage).
 pl.DataFrame.to_fasta = _df_to_fasta  # type: ignore[attr-defined]
 
 

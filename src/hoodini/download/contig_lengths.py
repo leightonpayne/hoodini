@@ -1,27 +1,25 @@
 import asyncio
-import os, io
-import math
-from time import perf_counter
+import os
 from pathlib import Path
 from importlib.resources import files
 from typing import Optional, List, Tuple, Dict, Any
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 import aiohttp  # type: ignore[import]
 import polars as pl  # type: ignore[import]
 import pyarrow.parquet as pq  # type: ignore[import]
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
 import json
-import re
-import pyarrow as pa  # for PartRotatingWriter
+import pyarrow as pa  
+import requests  # type: ignore[import]
 
 from hoodini.pipeline.helpers.prefetch_links import get_prefetched_link_table
 from hoodini.utils.logging_utils import console
 from hoodini.download.assembly_summary import download_assembly_summary_db
 
-# Optional API key override
 NCBI_API_KEY: Optional[str] = os.environ.get("NCBI_API_KEY")
 
-# File paths
 DATA_DIR = files("hoodini").joinpath("data")
 CONTIG_LENGTHS_DIR = DATA_DIR.joinpath("contig_lengths")
 MASTER_CONTIGS = DATA_DIR.joinpath("contig_lengths.parquet")
@@ -29,8 +27,8 @@ ASSEMBLY_SUMMARY = DATA_DIR.joinpath("assembly_summary.parquet")
 
 DEFAULT_GROUPS = {"bacteria", "viral", "archaea", "metagenomes", "other"}
 MAX_RETRIES = 3
+REMOTE_CONTIG_LENGTHS_URL = "https://storage.hoodini.bio/contig_lengths.parquet"
 
-# Candidate assembly ID columns
 _ASM_CANDIDATES: Tuple[str, ...] = (
     "assembly_accession",
     "assemblyAccession",
@@ -40,9 +38,21 @@ _ASM_CANDIDATES: Tuple[str, ...] = (
 )
 
 
-# ---------------------------------------------------------------------
-# Helpers to detect which column to use
-# ---------------------------------------------------------------------
+def _get_remote_parquet_last_modified() -> Optional[datetime]:
+    """Get Last-Modified date from remote contig_lengths.parquet."""
+    try:
+        resp = requests.head(REMOTE_CONTIG_LENGTHS_URL, timeout=10)
+        if resp.status_code == 200:
+            last_mod = resp.headers.get("Last-Modified")
+            if last_mod:
+                dt = parsedate_to_datetime(last_mod)
+                console.log(f"Remote contig_lengths.parquet last modified: {dt}")
+                return dt
+    except Exception as e:
+        console.log(f"⚠️  Could not fetch remote Last-Modified: {e}")
+    return None
+
+
 def _detect_assembly_col_in_file(path: Path) -> Optional[str]:
     try:
         pf = pq.ParquetFile(path)
@@ -67,68 +77,78 @@ def _detect_assembly_col_in_dir(dirpath: Path, sample: int = 10) -> Optional[str
     return None
 
 
-# ---------------------------------------------------------------------
-# Main function to check which assemblies are missing contig lengths
-# ---------------------------------------------------------------------
 def get_missing_contigs_from_summary(
-    assembly_summary_path: Path, allowed_assemblies: Optional[set] = None
-) -> Tuple[List[str], Optional[float]]:
-    summary_df = pl.read_parquet(ASSEMBLY_SUMMARY)
-    console.log(f"Number of rows in assembly_summary: {summary_df.height}")
-
-    summary_df = summary_df.filter(
-        (pl.col("group").is_in(DEFAULT_GROUPS))
-        & pl.col("ftp_path").is_not_null()
-        & (pl.col("ftp_path").str.strip_chars() != "")
-        & (pl.col("ftp_path").str.to_lowercase() != "na")
-    )
-
-    contig_set: set[str] = set()
-    latest_mtime: Optional[float] = None
-
-    # --- parts hive ---
-    if CONTIG_LENGTHS_DIR.exists():
-        part_files = list(CONTIG_LENGTHS_DIR.glob("part-*.parquet"))
-        part_col = _detect_assembly_col_in_dir(CONTIG_LENGTHS_DIR) or "assemblyAccession"
-        parts_df = (
-            pl.scan_parquet(str(CONTIG_LENGTHS_DIR / "*.parquet"))
-            .select([part_col])
-            .unique()
-            .collect()
+    assembly_summary_path: Path,
+    allowed_assemblies_df: Optional[pl.DataFrame] = None,
+) -> Tuple[pl.DataFrame, Optional[float]]:
+    """Return a DataFrame of missing assembly_accession values and latest mtime.
+    
+    Uses lazy evaluation and anti-join with streaming to minimize memory usage.
+    """
+    # Use lazy scan for summary
+    summary_lf = (
+        pl.scan_parquet(str(ASSEMBLY_SUMMARY))
+        .filter(
+            (pl.col("group").is_in(DEFAULT_GROUPS))
+            & pl.col("ftp_path").is_not_null()
+            & (pl.col("ftp_path").str.strip_chars() != "")
+            & (pl.col("ftp_path").str.to_lowercase() != "na")
         )
-        contig_set.update(parts_df[part_col].cast(pl.Utf8).to_list())
-        console.log(f"Loaded {len(contig_set)} assemblies from contig_lengths/ (hive)")
+        .select(pl.col("assembly_accession").cast(pl.Utf8))
+        .unique()
+    )
+    
+    # Filter by allowed_assemblies if provided (using semi-join)
+    if allowed_assemblies_df is not None:
+        summary_lf = summary_lf.join(
+            allowed_assemblies_df.lazy(),
+            on="assembly_accession",
+            how="semi",
+        )
+    
+    latest_mtime: Optional[float] = None
+    
+    # Build missing_lf lazily - scan ALL *.parquet files (compiled + new parts)
+    all_parquet_files = list(CONTIG_LENGTHS_DIR.glob("*.parquet"))
+    
+    if all_parquet_files:
+        console.log(f"Scanning {len(all_parquet_files)} parquet files in contig_lengths/...")
         try:
-            part_mtime = max(p.stat().st_mtime for p in part_files)
-            latest_mtime = max(latest_mtime, part_mtime) if latest_mtime is not None else part_mtime
+            latest_mtime = max(p.stat().st_mtime for p in all_parquet_files)
         except Exception:
             pass
-
-    summary_ids = set(summary_df["assembly_accession"].cast(pl.Utf8).to_list())
-    if allowed_assemblies is not None:
-        summary_ids = summary_ids.intersection(allowed_assemblies)
-
-    # Debug info
-    console.log(f"summary_df rows after filter: {summary_df.height}")
-    console.log("First 5 rows of summary_df:")
-    console.log(
-        f"Number of assembly_accession in summary_df: {len(summary_df['assembly_accession'])}"
-    )
-    console.log(f"contig_set size: {len(contig_set)}")
-    if contig_set:
-        console.log(f"First 10 contigs in contig_set: {list(contig_set)[:10]}")
+        
+        # Lazy scan for ALL existing contig assemblies
+        contig_lf = (
+            pl.scan_parquet(
+                str(CONTIG_LENGTHS_DIR / "*.parquet"),
+                missing_columns="insert",
+                extra_columns="ignore",
+            )
+            .select(pl.col("assemblyAccession").cast(pl.Utf8).alias("assembly_accession"))
+            .unique()
+        )
+        
+        # Anti-join to find missing (lazy)
+        missing_lf = summary_lf.join(
+            contig_lf,
+            on="assembly_accession",
+            how="anti",
+        )
     else:
-        console.log("contig_set is empty!")
+        console.log("No existing contig_lengths found, will download all")
+        missing_lf = summary_lf
+    
+    # Collect with streaming to minimize RAM usage
+    console.log("Collecting missing assemblies (streaming)...")
+    missing_df = missing_lf.collect(streaming=True)
+    
+    console.log(f"❗ {missing_df.height:,} assemblies missing contig lengths.")
     console.log(f"latest_mtime: {latest_mtime}")
-
-    missing = [aid for aid in summary_ids if aid not in contig_set]
-    console.log(f"❗ {len(missing)} assemblies missing contig lengths.")
-    return missing, latest_mtime
+    
+    return missing_df, latest_mtime
 
 
-# ---------------------------------------------------------------------
-# Async fetchers + rotating writer (unchanged)
-# ---------------------------------------------------------------------
 SENTINEL = object()
 
 
@@ -171,12 +191,12 @@ class PartRotatingWriter:
         table = pa.Table.from_pylist(rows)
         tmp = self.dir / f"part-{self.part_idx:05d}.parquet.tmp"
         pq.write_table(table, tmp, compression="zstd")
-        return os.path.getsize(tmp)
+        return tmp.stat().st_size
 
     def _commit_tmp(self):
         tmp = self.dir / f"part-{self.part_idx:05d}.parquet.tmp"
         final = self.dir / f"part-{self.part_idx:05d}.parquet"
-        os.replace(tmp, final)
+        tmp.replace(final)
         self.part_idx += 1
         self.total_files += 1
 
@@ -194,7 +214,7 @@ class PartRotatingWriter:
         rows = self._buffer
         target_n = min(self.rows_target, len(rows))
         try_rows = rows[:target_n]
-        size = self._write_once(try_rows)
+        self._write_once(try_rows)
         self._commit_tmp()
         del rows[:target_n]
         self._buffer = rows
@@ -325,58 +345,88 @@ def download_contig_lengths(
     else:
         console.log("⏭️  Skipping assembly_summary refresh (using local copy)")
 
-    # Determine allowed assemblies
-    allowed_assemblies = None
+    # Build allowed_assemblies as a DataFrame (not a Python set)
+    allowed_assemblies_df: Optional[pl.DataFrame] = None
     try:
-        asm_df = pl.read_parquet(ASSEMBLY_SUMMARY)
-        asm_df = asm_df.filter(
-            (pl.col("group").is_in(DEFAULT_GROUPS))
-            & pl.col("ftp_path").is_not_null()
-            & (pl.col("ftp_path").str.strip_chars() != "")
-            & (pl.col("ftp_path").str.to_lowercase() != "na")
+        # Use lazy scan to get candidate IDs without loading full DataFrame
+        candidate_ids_lf = (
+            pl.scan_parquet(str(ASSEMBLY_SUMMARY))
+            .filter(
+                (pl.col("group").is_in(DEFAULT_GROUPS))
+                & pl.col("ftp_path").is_not_null()
+                & (pl.col("ftp_path").str.strip_chars() != "")
+                & (pl.col("ftp_path").str.to_lowercase() != "na")
+            )
+            .select(pl.col("assembly_accession").cast(pl.Utf8))
+            .unique()
         )
-        candidate_ids = list(set(asm_df["assembly_accession"].to_list()))
+        candidate_ids = candidate_ids_lf.collect()["assembly_accession"].to_list()
+        
         if candidate_ids:
             links_df = get_prefetched_link_table(candidate_ids, kinds=["sequence_report"])
-            allowed_assemblies = set(
-                links_df[links_df["filetype"] == "sequence_report"]["assembly_id"].to_list()
+            # Keep as DataFrame instead of converting to Python set
+            allowed_assemblies_df = (
+                links_df.filter(pl.col("filetype") == "sequence_report")
+                .select(pl.col("assembly_id").cast(pl.Utf8).alias("assembly_accession"))
+                .unique()
             )
     except Exception:
-        allowed_assemblies = None
+        allowed_assemblies_df = None
 
-    missing, latest_mtime = get_missing_contigs_from_summary(
-        ASSEMBLY_SUMMARY, allowed_assemblies=allowed_assemblies
+    missing_df, latest_mtime = get_missing_contigs_from_summary(
+        ASSEMBLY_SUMMARY, allowed_assemblies_df=allowed_assemblies_df
     )
 
-    if latest_mtime is not None and missing:
-        asm_df = pl.read_parquet(ASSEMBLY_SUMMARY)
-        if "seq_rel_date" in asm_df.columns:
-            asm_df = asm_df.with_columns(pl.col("seq_rel_date").str.to_date())
-            asm_dates = dict(
-                zip(asm_df["assembly_accession"].cast(pl.Utf8), asm_df["seq_rel_date"])
-            )
-            latest_ts = pl.datetime(latest_mtime, time_unit="s")
-            filtered = []
-            for aid in missing:
-                dt = asm_dates.get(str(aid))
-                if dt is None or dt > latest_ts:
-                    filtered.append(aid)
-            console.log(
-                f"Filtered missing assemblies by seq_rel_date vs latest parquet mtime: {len(filtered)} remain"
-            )
-            missing = filtered
-        else:
-            console.log("❌ 'seq_rel_date' not found; skipping date-based filtering")
+    # Date-based filtering using remote file's Last-Modified date
+    if missing_df.height > 0:
+        # Get the remote file's Last-Modified date
+        remote_last_mod = _get_remote_parquet_last_modified()
+        
+        if remote_last_mod:
+            # Check if seq_rel_date column exists
+            schema = pl.scan_parquet(str(ASSEMBLY_SUMMARY)).collect_schema()
+            if "seq_rel_date" in schema.names():
+                remote_date = remote_last_mod.date()
+                
+                # Join missing with assembly dates, filter by date
+                asm_dates_lf = (
+                    pl.scan_parquet(str(ASSEMBLY_SUMMARY))
+                    .select([
+                        pl.col("assembly_accession").cast(pl.Utf8),
+                        pl.col("seq_rel_date").str.to_date().alias("seq_rel_date"),
+                    ])
+                )
+                
+                # Filter: keep if date is null OR date > remote_date
+                missing_df = (
+                    missing_df.lazy()
+                    .join(asm_dates_lf, on="assembly_accession", how="left")
+                    .filter(
+                        pl.col("seq_rel_date").is_null() | (pl.col("seq_rel_date") > remote_date)
+                    )
+                    .select("assembly_accession")
+                    .collect()
+                )
+                console.log(
+                    f"Filtered by remote date ({remote_date}): {missing_df.height:,} assemblies remain"
+                )
+            else:
+                console.log("⚠️  'seq_rel_date' not found in assembly_summary; skipping date filtering")
 
-    if not missing:
+    if missing_df.height == 0:
         console.log("✅ No missing contig lengths to download.")
         return
 
-    df_links = get_prefetched_link_table(missing, kinds=["sequence_report"], seqrep_only=True)
-    pairs: List[Tuple[str, str]] = []
-    for row in df_links.iter_rows(named=True):
-        if row.get("filetype") == "sequence_report":
-            pairs.append((row.get("assembly_id"), row.get("url")))
+    # Convert to list only at the end when needed for API call
+    missing_list = missing_df["assembly_accession"].to_list()
+    df_links = get_prefetched_link_table(missing_list, kinds=["sequence_report"], seqrep_only=True)
+    
+    # Use Polars filter instead of boolean mask indexing
+    links_filtered = df_links.filter(pl.col("filetype") == "sequence_report")
+    pairs: List[Tuple[str, str]] = list(zip(
+        links_filtered["assembly_id"].to_list(),
+        links_filtered["url"].to_list()
+    ))
 
     if not pairs:
         console.log("✅ No sequence_report links available for missing assemblies.")

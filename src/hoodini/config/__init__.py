@@ -13,9 +13,9 @@ def load_default_config() -> dict:
     flat = {}
     for section, values in grouped.items():
         if isinstance(values, dict):
-            flat.update(values)  # merge keys inside section
+            flat.update(values)  
         else:
-            flat[section] = values  # handle top-level keys if any
+            flat[section] = values  
     return flat
 
 

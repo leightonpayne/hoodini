@@ -1,12 +1,10 @@
-import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 import polars as pl
 
-from hoodini.utils.logging_utils import console
+from hoodini.utils.logging_utils import info, warn
 
 
 def run_protein_links(
@@ -24,7 +22,6 @@ def run_protein_links(
     - polars.DataFrame with columns [qseqid, sseqid, pident, length, evalue, bitscore]
       with self-hits removed (same genome prefix in qseqid and sseqid).
     """
-    # Find sequence column names
     df = all_prots.clone()
     if "sequence" not in df.columns:
         raise ValueError("all_prots must contain a 'sequence' column")
@@ -42,19 +39,16 @@ def run_protein_links(
     fasta_path = out_dir / "results.fasta"
     db_path = out_dir / "results.dmnd"
 
-    # Write FASTA if not present
     if not fasta_path.exists():
-        console.print(f"Writing protein FASTA to {fasta_path}")
+        info(f"Writing protein FASTA to {fasta_path}")
         with open(fasta_path, "w") as fh:
             for row in df.iter_rows(named=True):
                 fh.write(f">{row[id_col]}\n")
                 seq = row["sequence"]
-                # wrap at 80 chars
                 for i in range(0, len(seq), 80):
                     fh.write(seq[i : i + 80] + "\n")
 
-    # Build Diamond database
-    console.print("Building Diamond database...")
+    info("Building Diamond database...")
     makedb_cmd = [
         "diamond",
         "makedb",
@@ -66,10 +60,9 @@ def run_protein_links(
         str(threads),
     ]
     subprocess.run(makedb_cmd, check=True, capture_output=True)
-    console.print(f"Diamond database built: {db_path}")
-    # Run Diamond blastp
+    info(f"Diamond database built: {db_path}")
 
-    console.print("Running all-vs-all blastp (Diamond)...")
+    info("Running all-vs-all blastp (Diamond)...")
     with tempfile.NamedTemporaryFile(mode="w+", suffix=".tsv", delete=False) as tmp_out:
         blastp_cmd = [
             "diamond",
@@ -95,7 +88,6 @@ def run_protein_links(
         ]
         subprocess.run(blastp_cmd, check=True, capture_output=True)
 
-        # Read Diamond results
         try:
             results_df = pl.read_csv(
                 tmp_out.name,
@@ -117,19 +109,16 @@ def run_protein_links(
         finally:
             Path(tmp_out.name).unlink(missing_ok=True)
 
-    # Remove DB file(s)
     try:
         if db_path.exists():
             db_path.unlink()
     except Exception:
-        console.print(f"[yellow]warning[/yellow] could not remove diamond DB {db_path}")
+        warn(f"Could not remove diamond DB {db_path}")
 
     if results_df.height == 0:
-        console.print("No protein pairwise comparisons found")
+        warn("No protein pairwise comparisons found")
         return results_df
 
-    # Exclude self-hits based on genome prefix before the first '|'
-    # Extract genome prefix from qseqid and sseqid
     results_df = results_df.with_columns(
         [
             pl.col("qseqid").str.split("|").list.first().alias("qgenome"),
@@ -137,12 +126,9 @@ def run_protein_links(
         ]
     )
 
-    # Filter out rows where genomes are the same
     filtered = results_df.filter(pl.col("qgenome") != pl.col("sgenome")).drop(
         ["qgenome", "sgenome"]
     )
 
-    console.print(
-        f"Protein pairwise comparisons complete: {filtered.height} hits (self-hits removed)"
-    )
+    info(f"Protein pairwise comparisons complete: {filtered.height} hits (self-hits removed)")
     return filtered

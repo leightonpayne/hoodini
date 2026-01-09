@@ -12,7 +12,6 @@ hmm = "https://osf.io/3uz2j/files/osfstorage/647b9799bf3d0f0941d87eb2"
 
 [FOAM]
 tsv = "https://osf.io/3uz2j/files/osfstorage/642cb9b5d9cfc341d5b3d0c0"
-# no HMM available
 
 [GVDB]
 tsv = "https://osf.io/3uz2j/files/osfstorage/65fb534299b3460049aa325a"
@@ -20,18 +19,14 @@ hmm = "https://osf.io/3uz2j/files/osfstorage/65fb534ed09d170038eee97d"
 
 [KEGG]
 tsv = "https://osf.io/3uz2j/files/osfstorage/642cb9ca919206359beef462"
-# no HMM available
 
 [KOFam_all]
-# no TSV available
 hmm = "https://osf.io/3uz2j/files/osfstorage/648a11d7bee36d02690e560a"
 
 [KOFam_eukaryote]
-# no TSV available
 hmm = "https://osf.io/3uz2j/files/osfstorage/64824200cb70be0156f97282"
 
 [KOFam_prokaryote]
-# no TSV available
 hmm = "https://osf.io/3uz2j/files/osfstorage/64823a35cb70be0160f96b18"
 
 [NFixDB]

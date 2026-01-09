@@ -40,7 +40,6 @@ class RuntimeConfig:
     apikey: Optional[str] = None
     num_threads: Optional[int] = None
     assembly_folder: Optional[str] = None
-    assembly_db: Optional[str] = None
 
     prot_links: bool = False
     nt_links: bool = False
@@ -62,6 +61,8 @@ class RuntimeConfig:
     aai_mode: Optional[str] = None
     aai_subset_mode: Optional[str] = None
     nj_algorithm: Optional[str] = None
+    remote_evalue: Optional[float] = None
+    remote_max_targets: Optional[int] = None
 
     padloc: bool = False
     deffinder: bool = False
@@ -71,7 +72,7 @@ class RuntimeConfig:
     sorfs: bool = False
     domains: Optional[list[str]] = field(default=None)
     emapper: bool = False
-    min_prevalence: Optional[float] = None
+    min_pident: float = 30.0
 
     keep: bool = False
     force: bool = False
@@ -97,18 +98,15 @@ def build_runtime_config(
     for source in (defaults, file_overrides or {}, cli_overrides or {}):
         merged.update(_flatten_config(source))
 
-    # Normalize keys that appear with dashes in TOML
     if "aai-subset-mode" in merged and "aai_subset_mode" not in merged:
         merged["aai_subset_mode"] = merged["aai-subset-mode"]
     if "aai_subset_mode" in merged and "aai-subset-mode" not in merged:
         merged["aai-subset-mode"] = merged["aai_subset_mode"]
 
-    # Only pass known fields to the dataclass
     allowed_fields: set[str] = {field.name for field in RuntimeConfig.__dataclass_fields__.values()}  # type: ignore[attr-defined]
     filtered: Dict[str, Any] = {k: v for k, v in merged.items() if k in allowed_fields}
 
     config = RuntimeConfig(**filtered)
-    # Ensure runtime-only keys are set
     if config.input_path is None:
         config.input_path = None
     if config.inputsheet is None:

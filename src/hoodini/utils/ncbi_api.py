@@ -8,6 +8,7 @@ import taxoniq
 import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
+from hoodini.utils.logging_utils import info, warn, error
 
 
 def nuc2ass(nucleotide_ids, apikey=None, temp_dir="temp", chunk_size=10, max_concurrent=9):
@@ -89,8 +90,6 @@ def nuc2ass(nucleotide_ids, apikey=None, temp_dir="temp", chunk_size=10, max_con
         right_on="uid",
         how="left",
     )
-    # if the AccessionVersion does not contain "_", the AssemblyAccession should start with GCA_. If the Accessionversion contains "_", the AssemblyAccession should start with GCF_
-    # remove rows in which AssemblyAccession is missing
     df_nucsum = df_nucsum.dropna(subset=["AssemblyAccession"])
     df_nucsum["AssemblyAccession"] = df_nucsum.apply(
         lambda x: (
@@ -134,7 +133,6 @@ def nuc2len(nucleotide_ids, apikey, temp_dir="temp", chunk_size=100, max_concurr
     df_nucsum = df_nucsum[df_nucsum["doc_id"] != "0"]
 
     df_nucsum = df_nucsum[["AccessionVersion", "Length"]]
-    # rename accessionversion to nucleotide_id and Length to nucleotide_length (Polars returns new df)
     df_nucsum = df_nucsum.rename(
         {"AccessionVersion": "nucleotide_id", "Length": "nucleotide_length"}
     )
@@ -156,9 +154,7 @@ def download_file(url, index, folder):
     while True:
         try:
             response = requests.get(url, timeout=65)
-            # Check if we received any content
             if response.content:
-                # If there is no 'error' in the content, break the loop successfully
                 if (
                     "error" not in response.content.decode("utf-8")
                     and "Error" not in response.content.decode("utf-8")
@@ -166,19 +162,18 @@ def download_file(url, index, folder):
                 ):
                     break
             else:
-                print("No response received, retrying...")
+                warn("No response received, retrying...")
                 time.sleep(5)
         except requests.exceptions.ChunkedEncodingError as e:
-            print(f"Download interrupted (ChunkedEncodingError): {e}, retrying...")
+            warn(f"Download interrupted (ChunkedEncodingError): {e}, retrying...")
             time.sleep(5)
         except requests.RequestException as e:
-            print(f"General network error: {e}, retrying...")
+            warn(f"General network error: {e}, retrying...")
             time.sleep(5)
         except Exception as e:
-            print(f"Unexpected error: {e}, aborting...")
+            error(f"Unexpected error: {e}, aborting...")
             break
 
-    # Once we exit the loop successfully, write the content to a file
     with open(filename, "wb") as file:
         file.write(response.content)
     time.sleep(2)
@@ -189,7 +184,7 @@ def download_files(urls, folder, max_concurrent_downloads):
     folder.mkdir(parents=True, exist_ok=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent_downloads) as executor:
         for index, url in enumerate(urls):
-            print(f"Downloading {url} to {folder / f'{index}.txt'}")
+            info(f"Downloading {url} to {folder / f'{index}.txt'}")
             executor.submit(download_file, url, index, folder)
 
 
@@ -203,7 +198,7 @@ def create_ncbi_links(
         if engine == "efetch":
             chunk = ",".join(
                 [n.strip() for n in c if isinstance(n, str)]
-            )  # Get a comma-separated list from the chunk
+            )  
             base_url += f"&db={db}&rettype={rettype}&id="
         elif engine == "elink":
             if dbto is None:
@@ -215,7 +210,7 @@ def create_ncbi_links(
             end_url += "&api_key=" + apikey
         url = base_url + chunk + end_url
         link_list.append(url)
-    print(f"Created {len(link_list)} links for {engine} with chunk size {chunk_size}.")
+    info(f"Created {len(link_list)} links for {engine} with chunk size {chunk_size}.")
     return link_list
 
 
@@ -251,12 +246,9 @@ def parseXML(folder_path, mode):
 
     final_df = pl.DataFrame()
 
-    # Use ProcessPoolExecutor for parallel processing
     with ProcessPoolExecutor() as executor:
-        # Use functools.partial to pass the mode argument to process_file
         results = executor.map(partial(process_xml, mode=mode), all_file_paths)
 
-        # Combine all resulting dataframes
         for df in results:
             final_df = pl.concat([final_df, df], how="vertical") if final_df.height > 0 else df
 

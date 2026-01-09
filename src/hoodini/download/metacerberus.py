@@ -1,19 +1,15 @@
 from pathlib import Path
 from importlib.resources import files
-from hoodini.utils.logging_utils import console, stage_header, stage_done, logger
+from hoodini.utils.logging_utils import console, info, warn, stage_header, logger
 from rich.table import Table
 import shutil
-import os
-import logging
 import argparse
 from hoodini.utils.downloader import download_with_aria2c
 
-# OSF project info
 PROJ = "3uz2j"
 PROV = "osfstorage"
 ROOT_URL = f"https://api.osf.io/v2/nodes/{PROJ}/files/{PROV}/"
 
-# Where to store metacerberus DBs
 DATA_DIR = files("hoodini").joinpath("data", "metacerberus")
 
 
@@ -32,7 +28,6 @@ def fetch_all_items(url):
 
 
 def list_db_files():
-    # 1. Find the "db" folder ID in the root
     db_id = None
     for item in fetch_all_items(ROOT_URL):
         attr = item["attributes"]
@@ -41,7 +36,6 @@ def list_db_files():
             break
     if not db_id:
         raise RuntimeError("Couldn't find a folder named 'db' in root osfstorage")
-    # 2. List the contents of that folder (with full pagination)
     db_url = f"{ROOT_URL}{db_id}/"
     files = []
     for node in fetch_all_items(db_url):
@@ -61,7 +55,6 @@ def get_db_groups(files):
     """Return a dict: group -> list of file dicts."""
     groups = {}
     for f in files:
-        # group is prefix before first '.' or '_'
         name = f["name"]
         if name.endswith(".hmm.gz") or name.endswith(".tsv"):
             group = name.split(".")[0].split("_")[0].lower()
@@ -83,17 +76,12 @@ def check_downloaded(groups):
 
 def download_files(files, force=False):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    # Use aria2p+Rich downloader for all files
     urls = [f["download"] for f in files]
     dests = [DATA_DIR / f["name"] for f in files]
-    # Download all files to DATA_DIR; provide explicit out_names so aria2c
-    # prints friendly filenames instead of gid labels
     out_names = [f["name"] for f in files]
-    # Download
     logger.info(f"Downloading {len(urls)} metacerberus files to {DATA_DIR}")
     result_files = download_with_aria2c(urls, DATA_DIR, show_progress=True, out_names=out_names)
 
-    # Move/rename if needed
     for rf, dest in zip(result_files, dests):
         rpath = Path(rf)
         if rpath.is_file():
@@ -122,7 +110,6 @@ def main(selected=None, force=False):
     groups = get_db_groups(files)
     status = check_downloaded(groups)
     if selected is None or selected == "all":
-        # Just show table
         table = Table(title="MetaCerberus Databases", show_lines=True)
         table.add_column("Database", style="bold cyan")
         table.add_column("HMM file", style="green")
@@ -143,17 +130,15 @@ def main(selected=None, force=False):
             table.add_row(group, hmm, tsv)
         console.print(table)
         return
-    # Download selected group(s)
     wanted = [s.strip().lower() for s in selected.split(",") if s.strip()]
     to_download = [f for g in wanted for f in groups.get(g, [])]
     if not to_download:
-        console.print(f"[yellow]No files found for: {', '.join(wanted)}[/yellow]")
+        warn(f"No files found for: {', '.join(wanted)}")
         return
-    # Only download missing unless force
     if not force:
         to_download = [f for f in to_download if not (DATA_DIR / f["name"]).exists()]
     if not to_download:
-        console.print("[green]All requested MetaCerberus files are present![/green]")
+        info("All requested MetaCerberus files are present!")
         return
     download_files(to_download, force=force)
 

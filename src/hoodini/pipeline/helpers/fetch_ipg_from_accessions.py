@@ -6,18 +6,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
 from pathlib import Path
+from datetime import datetime
 
 import polars as pl
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from hoodini.utils.logging_utils import info, warn, error
 
 
-# Constants
 TOOL = "ipg_fetcher"
-# Number of accessions per efetch chunk
 CHUNK_SIZE = 100
 
-DEFAULT_MAX_CONCURRENT = 9  # when using API key
-DEFAULT_FALLBACK_CONCURRENT = 3  # without API key
+DEFAULT_MAX_CONCURRENT = 9  
+DEFAULT_FALLBACK_CONCURRENT = 3  
 NCBI_API_KEY = os.environ.get("NCBI_API_KEY")
 MAX_WORKERS = DEFAULT_MAX_CONCURRENT if NCBI_API_KEY else DEFAULT_FALLBACK_CONCURRENT
 MAX_PARALLEL = MAX_WORKERS
@@ -39,7 +39,6 @@ def _efetch_chunk(accessions: list[str]) -> str:
         TOOL,
     ]
 
-    # Retry logic for transient NCBI errors
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -47,33 +46,33 @@ def _efetch_chunk(accessions: list[str]) -> str:
             if not result.stdout or not result.stdout.strip():
                 if "500" in result.stderr or "ERROR" in result.stderr:
                     if attempt < max_retries - 1:
-                        print(
-                            f"[WARN] efetch error 500/network issue (attempt {attempt+1}/{max_retries}), retrying in 5s..."
+                        warn(
+                            f"efetch error 500/network issue (attempt {attempt+1}/{max_retries}), retrying in 5s..."
                         )
                         time.sleep(5)
                         continue
-                print(
-                    f"[WARN] efetch returned empty for IDs: {accessions[:3]}... (stderr: {result.stderr[:200]})"
+                warn(
+                    f"efetch returned empty for IDs: {accessions[:3]}... (stderr: {result.stderr[:200]})"
                 )
             return result.stdout
         except subprocess.CalledProcessError as e:
             if attempt < max_retries - 1:
-                print(
-                    f"[WARN] efetch failed (attempt {attempt+1}/{max_retries}): {e.stderr[:200]}, retrying..."
+                warn(
+                    f"efetch failed (attempt {attempt+1}/{max_retries}): {e.stderr[:200]}, retrying..."
                 )
                 time.sleep(5)
                 continue
-            print(
-                f"[ERROR] efetch failed for IDs {accessions[:3]}... after {max_retries} attempts: {e.stderr[:500]}"
+            error(
+                f"efetch failed for IDs {accessions[:3]}... after {max_retries} attempts: {e.stderr[:500]}"
             )
             return ""
         except subprocess.TimeoutExpired:
             if attempt < max_retries - 1:
-                print(f"[WARN] efetch timeout (attempt {attempt+1}/{max_retries}), retrying...")
+                warn(f"efetch timeout (attempt {attempt+1}/{max_retries}), retrying...")
                 time.sleep(5)
                 continue
-            print(
-                f"[ERROR] efetch timeout for IDs {accessions[:3]}... after {max_retries} attempts"
+            error(
+                f"efetch timeout for IDs {accessions[:3]}... after {max_retries} attempts"
             )
             return ""
 
@@ -84,14 +83,12 @@ def fetch_ipg_from_accessions(accessions: list[str]) -> pl.DataFrame:
     """
     Fetch IPG data for a list of protein accessions in parallel with rate limiting.
     """
-    # Check efetch availability
     try:
         subprocess.run(["efetch", "-version"], check=True, capture_output=True, timeout=5)
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(f"[ERROR] efetch not available or not working: {e}")
+        error(f"efetch not available or not working: {e}")
         return pl.DataFrame()
 
-    # Quiet: avoid noisy debug prints during normal runs
     semaphore = threading.Semaphore(MAX_PARALLEL)
     chunks = [accessions[i : i + CHUNK_SIZE] for i in range(0, len(accessions), CHUNK_SIZE)]
     results = [None] * len(chunks)
@@ -100,13 +97,18 @@ def fetch_ipg_from_accessions(accessions: list[str]) -> pl.DataFrame:
         with semaphore:
             return idx, _efetch_chunk(chunk)
 
+    ts_col = TextColumn(
+        f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"
+    )
     with Progress(
-        TextColumn("[progress.description]{task.description}"),
+        ts_col,
         SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=40),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        BarColumn(),
         TextColumn("Chunk {task.completed}/{task.total}"),
         TimeElapsedColumn(),
+        TimeRemainingColumn(),
     ) as progress:
         task = progress.add_task("Fetching IPG chunks", total=len(chunks))
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -115,7 +117,6 @@ def fetch_ipg_from_accessions(accessions: list[str]) -> pl.DataFrame:
             }
             for future in as_completed(future_to_idx):
                 idx, chunk_result = future.result()
-                # Parse immediately to avoid holding massive strings in memory
                 if chunk_result and chunk_result.strip():
                     try:
                         chunk_df = pl.read_csv(
@@ -127,10 +128,10 @@ def fetch_ipg_from_accessions(accessions: list[str]) -> pl.DataFrame:
                         results[idx] = chunk_df
                     except Exception as e:
                         snippet = chunk_result[:200].replace("\n", "\\n")
-                        print(f"[WARN] Failed to parse IPG chunk {idx}: {e}. Snippet: {snippet}")
+                        warn(f"Failed to parse IPG chunk {idx}: {e}. Snippet: {snippet}")
                         results[idx] = None
                 else:
-                    print(f"[WARN] Empty IPG chunk {idx} returned by efetch")
+                    warn(f"Empty IPG chunk {idx} returned by efetch")
                     results[idx] = None
                 progress.update(task, advance=1)
 
@@ -155,11 +156,11 @@ def main():
     df = fetch_ipg_from_accessions(accessions)
 
     if df.height == 0:
-        print("[WARN] No IPG data retrieved.")
+        warn("No IPG data retrieved.")
     else:
         out_path = Path(args.output)
         df.write_csv(out_path, separator="\t")
-        print(f"[INFO] Saved {df.height} IPG entries to {out_path}")
+        info(f"Saved {df.height} IPG entries to {out_path}")
 
 
 if __name__ == "__main__":

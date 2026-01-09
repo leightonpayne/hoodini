@@ -9,13 +9,10 @@ from hoodini.utils.logging_utils import console
 
 
 def _safe_name(s: str) -> str:
-    # create a filesystem-safe short name
     s = str(s)
     s = s.strip()
-    # take last path segment if present
     if "/" in s or "\\" in s:
         s = Path(s).name
-    # keep alnum and few safe chars
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", s)
 
 
@@ -23,7 +20,6 @@ def _resolve_path(name: str, output_dir: Path) -> Path:
     p = Path(name)
     if p.exists():
         return p
-    # common places produced by run_ani
     candidates = [
         output_dir / "ani_split" / name,
         output_dir / "ani_split" / (name + ".fasta"),
@@ -66,13 +62,11 @@ def run_nt_links(
     work_dir = out / "fastani_pairwise_visual"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Normalize column names (accept lowercase variants)
     df = pairwise_ani.copy()
     col_map = {c.lower(): c for c in df.columns}
     q_col = col_map.get("query_name") or col_map.get("query") or "Query_name"
     r_col = col_map.get("ref_name") or col_map.get("reference") or "Ref_name"
 
-    # Filter to meaningful hits (require alignment fractions if present)
     if "Align_fraction_ref" in df.columns or "Align_fraction_query" in df.columns:
         df = df.dropna(
             subset=[c for c in ["Align_fraction_ref", "Align_fraction_query"] if c in df.columns]
@@ -81,7 +75,6 @@ def run_nt_links(
     visual_rows = []
     seen_pairs = set()
 
-    # Use a Jupyter-aware progress bar: prefer tqdm.notebook in Jupyter, otherwise use rich.progress.Progress.
     def _in_jupyter():
         try:
             from IPython import get_ipython
@@ -92,7 +85,6 @@ def run_nt_links(
             return False
 
     total = len(df)
-    # Prefer tqdm.notebook in Jupyter; else try rich.progress; else fallback to no-progress iterator
     iterator = None
     if _in_jupyter():
         try:
@@ -135,23 +127,19 @@ def run_nt_links(
         if q_name is None or r_name is None:
             continue
 
-        # Canonical pair key
         pair_key = tuple(sorted([str(q_name), str(r_name)]))
         if pair_key in seen_pairs:
             continue
         seen_pairs.add(pair_key)
 
-        # prepare output filenames using the full identifiers (do not shorten/sanitize)
         raw0 = str(pair_key[0])
         raw1 = str(pair_key[1])
         out_file = work_dir / f"{raw0}__vs__{raw1}.visual"
-        # ensure parent directories exist in case identifiers contain path separators
         out_file.parent.mkdir(parents=True, exist_ok=True)
 
         if out_file.exists():
             visual_file = out_file
         else:
-            # resolve file paths for fastANI
             try:
                 q_path = _resolve_path(pair_key[0], out)
                 r_path = _resolve_path(pair_key[1], out)
@@ -159,7 +147,6 @@ def run_nt_links(
                 console.log(f"Skipping pair {pair_key}: {exc}")
                 continue
 
-            # create a unique temporary base for fastANI output using full ids
             temp_base = work_dir / f"{raw0}__vs__{raw1}.fastani"
             temp_base.parent.mkdir(parents=True, exist_ok=True)
             temp_out = temp_base
@@ -177,7 +164,6 @@ def run_nt_links(
                 str(threads),
             ]
             temp_log = Path(str(temp_out) + ".fastani.log")
-            # progress bar shows activity; detailed output is in {temp_log}
             try:
                 with open(temp_log, "w") as logfh:
                     subprocess.run(cmd, check=True, stdout=logfh, stderr=logfh, text=True)
@@ -196,11 +182,9 @@ def run_nt_links(
                 visual_file.rename(out_file)
                 visual_file = out_file
             except Exception:
-                # if rename fails, just keep path
                 pass
 
             if not keep_temp:
-                # remove any intermediate files produced by fastANI except the .visual
                 for ext in [".frag", ".fastani", ".log"]:
                     p = Path(str(temp_out) + ext)
                     if p.exists():
@@ -209,7 +193,6 @@ def run_nt_links(
                         except Exception:
                             pass
 
-        # parse the .visual file
         try:
             parsed = pl.read_csv(
                 visual_file,
@@ -235,21 +218,15 @@ def run_nt_links(
             console.log(f"Failed to parse visual file {visual_file}: {e}")
             continue
 
-        # keep only relevant columns
         parsed = parsed[["query", "ref", "ani", "query_start", "query_end", "ref_start", "ref_end"]]
 
-        # remove directory path from query/ref names (keep basename only)
         parsed["query"] = parsed["query"].apply(lambda s: Path(str(s)).name if pl.notna(s) else s)
         parsed["ref"] = parsed["ref"].apply(lambda s: Path(str(s)).name if pl.notna(s) else s)
 
-        # If neighborhood table provided, correct coordinates (they are relative to window)
-        # similar to run_ncrna: add the start_win offset to query/ref coordinates
         if all_neigh is not None and all_neigh.height > 0:
-            # build a mapping from possible identifiers to start_win and seqid
             start_map = {}
             id_map = {}
             for nr in all_neigh.iter_rows(named=True):
-                # prefer temp_seqid if present, fallback to seqid
                 temp = None
                 if "temp_seqid" in nr and pl.notna(nr.get("temp_seqid")):
                     temp = str(nr.get("temp_seqid"))
@@ -264,14 +241,12 @@ def run_nt_links(
                     else 0
                 )
 
-                # register multiple keys: full, basename, stem
                 for key in set([temp, seqid]):
                     if not key:
                         continue
                     start_map[key] = start_win
                     start_map[Path(key).name] = start_win
                     start_map[Path(key).stem] = start_win
-                    # also store mapping to canonical seqid
                     id_map[key] = seqid
                     id_map[Path(key).name] = seqid
                     id_map[Path(key).stem] = seqid
@@ -280,7 +255,6 @@ def run_nt_links(
                 if name is None:
                     return 0
                 name = str(name)
-                # try direct match then basename then stem
                 return (
                     start_map.get(name)
                     or start_map.get(Path(name).name)
@@ -299,7 +273,6 @@ def run_nt_links(
                     or name
                 )
 
-            # compute absolute coordinates
             parsed["q_offset"] = parsed["query"].apply(_find_offset)
             parsed["r_offset"] = parsed["ref"].apply(_find_offset)
 
@@ -308,11 +281,9 @@ def run_nt_links(
             parsed["ref_start"] = parsed["ref_start"].astype(float) + parsed["r_offset"]
             parsed["ref_end"] = parsed["ref_end"].astype(float) + parsed["r_offset"]
 
-            # replace query/ref with canonical seqid when available
             parsed["query"] = parsed["query"].apply(_map_to_seqid)
             parsed["ref"] = parsed["ref"].apply(_map_to_seqid)
 
-            # drop helper offsets
             parsed = parsed.drop(["q_offset", "r_offset"])
 
         visual_rows.append(parsed)

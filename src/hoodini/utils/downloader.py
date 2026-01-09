@@ -1,10 +1,8 @@
-import time
 import subprocess
 from pathlib import Path
 from rich.progress import (
     Progress,
     BarColumn,
-    DownloadColumn,
     TransferSpeedColumn,
     TimeRemainingColumn,
     TextColumn,
@@ -32,7 +30,6 @@ def download_with_aria2c(
     dest_dir.mkdir(parents=True, exist_ok=True)
     results = []
 
-    # helpers
     PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)%")
     SIZE_RE = re.compile(r"([\d.]+)\s*([KMGTP]?i?B)/([\d.]+)\s*([KMGTP]?i?B)")
 
@@ -59,7 +56,6 @@ def download_with_aria2c(
                 return f"{n:.2f} {unit}"
             n /= 1024
 
-    # Prepare output names
     from urllib.parse import urlparse, unquote
 
     out_name_list = []
@@ -84,7 +80,6 @@ def download_with_aria2c(
             out_name = f"downloaded_file_{idx}"
         out_name_list.append(out_name)
 
-    # Write aria2c input file for per-URL output names
     input_lines = []
     for url, out_name in zip(urls, out_name_list):
         input_lines.append(f"{url}\n  out={out_name}")
@@ -95,7 +90,6 @@ def download_with_aria2c(
             f.write(line + "\n")
         input_file = f.name
 
-    # Use num_threads for aria2c concurrency if provided
     max_conn = str(num_threads or 16)
     cmd = [
         "aria2c",
@@ -125,7 +119,6 @@ def download_with_aria2c(
                 refresh_per_second=10,
                 transient=True,
             ) as progress:
-                # One progress bar for all files (aggregate)
                 task = progress.add_task("aria2c batch", total=None, bytes_text="…")
 
             proc = subprocess.Popen(
@@ -150,7 +143,6 @@ def download_with_aria2c(
                 for part in parts[:-1]:
                     line = part.decode("utf-8", "ignore")
                     downloaded, total, pct = None, None, None
-                    # Try to parse per-file or aggregate progress
                     m = SIZE_RE.search(line)
                     if m:
                         d_num, d_unit, t_num, t_unit = m.groups()
@@ -206,14 +198,11 @@ def download_with_aria2c(
         else:
             subprocess.run(cmd, check=True)
     finally:
-        # cleanup temporary aria2 input file to avoid leaving intermediates on disk
         try:
             Path(input_file).unlink()
         except Exception:
             pass
 
-    # Return the expected output file paths
-    # Only return files that actually exist to avoid downstream attempts to copy/move missing paths
     for out_name in out_name_list:
         candidate = dest_dir / out_name
         if candidate.exists():

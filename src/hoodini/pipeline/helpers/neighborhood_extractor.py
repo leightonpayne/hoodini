@@ -11,9 +11,7 @@ Architecture:
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
-import sys
 import traceback
 from typing import Literal
 
@@ -28,15 +26,14 @@ from Bio.Seq import Seq
 class NeighborhoodResult:
     """Structured result from extract_neighborhood."""
 
-    proteins: pl.DataFrame  # GFF-like with id, sequence, attributes
-    neighborhood: pl.DataFrame  # seqid, start/end_win, sequence, unique_id
+    proteins: pl.DataFrame  
+    neighborhood: pl.DataFrame  
     unique_id: str
 
 
 class NeighborhoodExtractionError(Exception):
     """Base exception for neighborhood extraction failures."""
 
-    pass
 
 
 def parse_gbff(gbff_path: str, nucleotide_id: str | None = None) -> tuple[pl.DataFrame, object]:
@@ -48,10 +45,9 @@ def parse_gbff(gbff_path: str, nucleotide_id: str | None = None) -> tuple[pl.Dat
     Raises:
         NeighborhoodExtractionError: if file missing, parsing fails, or nucleotide_id not found
     """
-    if not os.path.exists(gbff_path):
+    if not Path(gbff_path).exists():
         raise NeighborhoodExtractionError(f"GenBank file not found: {gbff_path}")
 
-    # Load GenBank file directly (ProcessPoolExecutor timeout handles hanging)
     try:
         records = gb_io.load(gbff_path)
         records_list = list(records)
@@ -61,7 +57,6 @@ def parse_gbff(gbff_path: str, nucleotide_id: str | None = None) -> tuple[pl.Dat
     if not records_list:
         raise NeighborhoodExtractionError(f"No records found in {gbff_path}")
 
-    # Find matching record
     record = None
     if nucleotide_id:
         for rec in records_list:
@@ -75,12 +70,10 @@ def parse_gbff(gbff_path: str, nucleotide_id: str | None = None) -> tuple[pl.Dat
                 f"Nucleotide {nucleotide_id} not found in {gbff_path}. Available: {[getattr(r, 'version', '?') for r in records_list[:3]]}"
             )
     else:
-        # Take first record if no nucleotide_id specified
         record = records_list[0] if records_list else None
         if record is None:
             raise NeighborhoodExtractionError(f"No records found in {gbff_path}")
 
-    # Extract features
     record_version = getattr(record, "version", "unknown")
 
     feature_data = _process_gbff_features(record.features, record_version)
@@ -90,27 +83,21 @@ def parse_gbff(gbff_path: str, nucleotide_id: str | None = None) -> tuple[pl.Dat
 
     features_df = pl.DataFrame(feature_data)
 
-    # Unwrap attributes dict into columns
     if "attributes" in features_df.columns:
         attrs_list = features_df["attributes"].to_list()
         attrs_df = pl.DataFrame(attrs_list)
 
-        # Drop protein_id from attrs to avoid duplicate
         if "protein_id" in attrs_df.columns:
             attrs_df = attrs_df.drop("protein_id")
 
-        # Use join instead of concat to avoid horizontal concat issues
         features_df = features_df.drop("attributes")
 
-        # Add row index to both for alignment
         features_df = features_df.with_row_count("_join_idx")
         attrs_df = attrs_df.with_row_count("_join_idx")
 
-        # Join on index
         features_df = features_df.join(attrs_df, on="_join_idx", how="inner")
         features_df = features_df.drop("_join_idx")
 
-        # Rename translation to sequence
         if "translation" in features_df.columns:
             features_df = features_df.rename({"translation": "sequence"})
 
@@ -134,7 +121,6 @@ def _process_gbff_features(features, record_accession: str) -> list[dict]:
         if not protein_id:
             continue
 
-        # Parse location
         class_type = type(location).__name__
 
         if class_type == "Range":
@@ -178,9 +164,9 @@ def parse_gff_faa(gff_path: str, faa_path: str) -> pl.DataFrame:
     Raises:
         NeighborhoodExtractionError: if files missing or parsing fails
     """
-    if not os.path.exists(gff_path):
+    if not Path(gff_path).exists():
         raise NeighborhoodExtractionError(f"GFF file not found: {gff_path}")
-    if not os.path.exists(faa_path):
+    if not Path(faa_path).exists():
         raise NeighborhoodExtractionError(f"FAA file not found: {faa_path}")
 
     gff_header = [
@@ -196,7 +182,6 @@ def parse_gff_faa(gff_path: str, faa_path: str) -> pl.DataFrame:
     ]
 
     try:
-        # Read without comment handling; filter manually if needed
         gff = pl.read_csv(
             gff_path,
             separator="\t",
@@ -204,7 +189,6 @@ def parse_gff_faa(gff_path: str, faa_path: str) -> pl.DataFrame:
             new_columns=gff_header,
             skip_rows_after_header=0,
         )
-        # Filter out comment lines if any
         if gff.height > 0 and "seqid" in gff.columns:
             gff = gff.filter(~pl.col("seqid").str.starts_with("#"))
     except Exception as e:
@@ -215,12 +199,8 @@ def parse_gff_faa(gff_path: str, faa_path: str) -> pl.DataFrame:
     except Exception as e:
         raise NeighborhoodExtractionError(f"Failed to read FAA file {faa_path}: {e}")
 
-    # Extract protein_id from GFF attributes
-    # Assumes attributes contain "ID=<protein_id>" or similar
-    # This is a simplified version; adjust pattern as needed
     gff = gff.with_columns(pl.col("attributes").str.extract(r"ID=([^;]+)", 1).alias("protein_id"))
 
-    # Join with sequences
     features_df = gff.join(faa_df, left_on="protein_id", right_on="id", how="left")
 
     if features_df.height == 0:
@@ -260,7 +240,6 @@ def compute_window(
         if not protein_id:
             raise NeighborhoodExtractionError("protein_id required for input_type=protein")
 
-        # Find protein coordinates
         match = features_df.filter(pl.col("protein_id") == protein_id)
         if match.height == 0:
             raise NeighborhoodExtractionError(f"Protein {protein_id} not found in features")
@@ -289,7 +268,6 @@ def compute_window(
 
     elif input_type == "nucleotide":
         if start is None or end is None:
-            # Use full sequence
             start_win = 0
             end_win = sequence_length or features_df["end"].max()
             start = start_win
@@ -334,15 +312,12 @@ def extract_features_in_window(
     """Filter features to those within the window."""
     subset = features_df.filter((pl.col("start") >= start_win) & (pl.col("end") <= end_win))
 
-    # Add id column from protein_id
     if "protein_id" in subset.columns:
         subset = subset.with_columns(pl.col("protein_id").alias("id"))
 
-    # Ensure product column exists
     if "product" not in subset.columns:
         subset = subset.with_columns(pl.lit(None).alias("product"))
 
-    # Select final columns
     columns = [
         "seqid",
         "source",
@@ -375,7 +350,6 @@ def annotate_sorfs(
     orf_finder = pyrodigal.GeneFinder(meta=True, min_gene=10, max_overlap=9)
     new_genes = []
 
-    # Pyrodigal sORFs
     for i, pred in enumerate(orf_finder.find_genes(sequence)):
         overlap_flag = False
         for row in features_df.iter_rows(named=True):
@@ -403,7 +377,6 @@ def annotate_sorfs(
                 }
             )
 
-    # Orfipy sORFs
     seq_upper = sequence.upper()
     for i, (start, stop, strand, description) in enumerate(
         orfipy_core.orfs(seq_upper, minlen=100, maxlen=1000, partial3=False, between_stops=False)
@@ -484,7 +457,6 @@ def extract_neighborhood(
     This is the main entry point called by multiprocessing pool.
     """
     try:
-        # Parse input files
         if gbf_file:
             features_df, record = parse_gbff(gbf_file, nucleotide_id)
             record_version = getattr(record, "version", "unknown")
@@ -493,10 +465,8 @@ def extract_neighborhood(
         elif gff_file and faa_file:
             features_df = parse_gff_faa(gff_file, faa_file)
             record_version = nucleotide_id or "unknown"
-            # For GFF+FAA, we need FNA file for sequence
-            if fna_file and os.path.exists(fna_file):
+            if fna_file and Path(fna_file).exists():
                 fna_df = _read_fasta(fna_file)
-                # Find matching sequence
                 seq_match = (
                     fna_df.filter(pl.col("id") == nucleotide_id)
                     if nucleotide_id
@@ -509,7 +479,6 @@ def extract_neighborhood(
                 else:
                     raise NeighborhoodExtractionError("Nucleotide sequence not found in FNA file")
             else:
-                # No FNA file; can't extract sequence
                 sequence_bytes = b""
                 sequence_length = features_df["end"].max() if features_df.height > 0 else 0
         else:
@@ -517,7 +486,6 @@ def extract_neighborhood(
                 "Must provide either gbf_file or (gff_file and faa_file)"
             )
 
-        # Compute window
         start_win, end_win, strand, start_target, end_target = compute_window(
             features_df,
             input_type=input_type,
@@ -531,22 +499,18 @@ def extract_neighborhood(
             sequence_length=sequence_length,
         )
 
-        # Extract features in window
         subgff = extract_features_in_window(features_df, start_win, end_win)
 
         if subgff.height == 0:
             raise NeighborhoodExtractionError("No features found in computed window")
 
-        # Add unique_id to each protein in the neighborhood
         subgff = subgff.with_columns(pl.lit(unique_id).alias("unique_id"))
 
-        # Extract sequence
         if sequence_bytes:
             window_sequence = sequence_bytes[start_win:end_win].decode("utf-8")
         else:
             window_sequence = ""
 
-        # Annotate sORFs if requested
         if sorfs and window_sequence:
             subgff = annotate_sorfs(
                 subgff,
@@ -556,7 +520,6 @@ def extract_neighborhood(
                 unique_id or "unknown",
             )
 
-        # Build neighborhood metadata
         neighborhood = pl.DataFrame(
             {
                 "seqid": [record_version],
@@ -573,10 +536,8 @@ def extract_neighborhood(
         return subgff, neighborhood, unique_id, None
 
     except NeighborhoodExtractionError as e:
-        # Known extraction error; return gracefully
         return None, None, unique_id, str(e)
     except Exception as e:
-        # Unexpected error; log and return
         tb = traceback.format_exc()
         error_msg = f"Unexpected error: {e}\n{tb}"
         return None, None, unique_id, error_msg

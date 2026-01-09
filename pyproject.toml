@@ -44,19 +44,19 @@ extend-exclude = ["src/hoodini/data", "hoodini.egg-info"]
 
 [tool.ruff.lint]
 select = [
-	"E",   # pycodestyle errors
-	"F",   # pyflakes
-	"I",   # import sorting
-	"UP",  # pyupgrade
-	"B",   # bugbear
-	"C4",  # comprehensions
-	"SIM", # simplify
-	"N",   # naming
-	"S",   # security
-	"PL",  # light pylint-style checks
+	"E",   
+	"F",   
+	"I",   
+	"UP",  
+	"B",   
+	"C4",  
+	"SIM", 
+	"N",   
+	"S",   
+	"PL",  
 ]
 ignore = [
-	"B905",  # allow zip without strict when intentional
+	"B905",  
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -3,13 +3,11 @@ import concurrent.futures
 import csv
 import io
 import logging
-import sys
 from pathlib import Path
 
 import httpx
 import polars as pl
 import requests
-from rich.console import Console
 from rich.live import Live
 from rich.logging import RichHandler
 from rich.panel import Panel
@@ -19,14 +17,13 @@ from rich.progress import (
     Progress,
     SpinnerColumn,
     TextColumn,
-    TimeElapsedColumn,
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
 from rich.table import Table
 from rich.text import Text
+from hoodini.utils.logging_utils import console
 
-# URLs for BacDive and PhageDive
 BACDIVE_URL = "https://bacdive.dsmz.de/advsearch/csv?fg%5B0%5D%5Bgc%5D=OR&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfd%5D=Genome+seq.+accession+number&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfo%5D=contains&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfv%5D=%2A&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfvd%5D=sequence_genomes-sequence_acc-7&fg%5B0%5D%5Bfl%5D%5B2%5D=AND&fg%5B0%5D%5Bfl%5D%5B3%5D%5Bfd%5D=Genome+Sequence+database&fg%5B0%5D%5Bfl%5D%5B3%5D%5Bfv%5D=ncbi&fg%5B0%5D%5Bfl%5D%5B3%5D%5Bfvd%5D=sequence_genomes-source_db-7"
 PHAGEDIVE_URL = "https://phagedive.dsmz.de/advsearch/csv?fg%5B0%5D%5Bgc%5D=OR&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfd%5D=Assembly+accession+number&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfo%5D=contains&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfv%5D=%2A&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfvd%5D=sequence_genome-assembly_accession_number-10"
 
@@ -34,9 +31,6 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 BACDIVE_OUT = DATA_DIR / "bacdive_download.csv"
 PHAGEDIVE_OUT = DATA_DIR / "phagedive_download.csv"
 
-console = Console()
-
-# Set up logging with Rich
 logger = logging.getLogger("type_dive")
 logger.setLevel(logging.INFO)
 handler = RichHandler(console=console, show_time=True, show_level=True, show_path=False)
@@ -58,7 +52,6 @@ def download_csv(url, out_path, desc):
 
 
 def fill_empty_with_previous(rows):
-    # Fill empty cells with the value from the previous row (per column)
     if not rows:
         return rows
     prev = rows[0][:]
@@ -74,7 +67,6 @@ def parse_bacdive_csv(in_path, out_path):
     logger.info(f"Parsing BacDive CSV: {in_path}")
     with open(in_path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
-        # Skip lines until header (first col == 'ID')
         for row in reader:
             if row and row[0].strip() == "ID":
                 header = row
@@ -83,20 +75,16 @@ def parse_bacdive_csv(in_path, out_path):
             logger.error("Could not find BacDive header row!")
             return
         data = [row for row in reader if row and any(cell.strip() for cell in row)]
-    # Fill empty cells
     data_filled = fill_empty_with_previous(data)
-    # Normalize columns
     idx_id = header.index("ID")
     idx_strain = header.index("strain_number_header")
     idx_assembly = header.index("Genome seq. accession number")
     out_header = ["bacdive_id", "collection_id", "assembly_id"]
     out_rows = []
     for row in data_filled:
-        # Pad row if short (trailing empty columns)
         if len(row) < max(idx_id, idx_strain, idx_assembly) + 1:
             row = row + [""] * (max(idx_id, idx_strain, idx_assembly) + 1 - len(row))
         out_rows.append([row[idx_id], row[idx_strain], row[idx_assembly]])
-    # Do not write to TSV/CSV, just return header and rows
     return out_header, out_rows
 
 
@@ -104,7 +92,6 @@ def parse_phagedive_csv(in_path, out_path):
     logger.info(f"Parsing PhageDive CSV: {in_path}")
     with open(in_path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
-        # Skip lines until header (first col == 'ID')
         for row in reader:
             if row and row[0].strip() == "ID":
                 header = row
@@ -113,7 +100,6 @@ def parse_phagedive_csv(in_path, out_path):
             logger.error("Could not find PhageDive header row!")
             return
         data = [row for row in reader if row and any(cell.strip() for cell in row)]
-    # Normalize columns
     idx_phagedive_id = header.index("ID")
     idx_coll = header.index("Collection number")
     idx_assembly = header.index("Assembly accession number")
@@ -123,7 +109,6 @@ def parse_phagedive_csv(in_path, out_path):
         if len(row) < max(idx_phagedive_id, idx_coll, idx_assembly) + 1:
             row = row + [""] * (max(idx_phagedive_id, idx_coll, idx_assembly) + 1 - len(row))
         out_rows.append([row[idx_phagedive_id], row[idx_coll], row[idx_assembly]])
-    # Do not write to TSV/CSV, just return header and rows
     return out_header, out_rows
 
 
@@ -131,7 +116,7 @@ def print_table(header, rows, title):
     table = Table(title=title, show_lines=True)
     for col in header:
         table.add_column(col, style="cyan")
-    for row in rows[:10]:  # Show only first 10 for preview
+    for row in rows[:10]:  
         table.add_row(*row)
     console.print(table)
 
@@ -139,7 +124,6 @@ def print_table(header, rows, title):
 def main():
     DATA_DIR.mkdir(exist_ok=True)
 
-    # --- Progress bar columns as in assembly_summary.py ---
     progress_columns = [
         TextColumn("[bold blue]{task.description}", justify="left"),
         SpinnerColumn(),
@@ -150,7 +134,6 @@ def main():
     ]
     progress = Progress(*progress_columns, transient=False)
 
-    # --- Log panel and handler as in assembly_summary.py ---
     log_text = Text(justify="left")
     log_panel = Panel(log_text, title="Logs", border_style="dim")
 
@@ -173,18 +156,15 @@ def main():
             }.get(record.levelname, "white")
             self.rich_text.append(msg + "\n", style=style)
 
-    # Remove previous handlers and add RichTextHandler
     for h in logger.handlers[:]:
         logger.removeHandler(h)
     rich_handler = RichTextHandler(log_text)
     logger.addHandler(rich_handler)
     logger.propagate = False
 
-    # Suppress noisy logs from requests, httpx, urllib3, etc.
     for noisy in ["httpx", "urllib3", "requests"]:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    # --- Composite renderable for Live (just like assembly_summary.py) ---
     class ProgressAndLogs:
         def __rich_console__(self, console, options):
             yield progress
@@ -203,9 +183,8 @@ def main():
     async def async_download():
         loop = asyncio.get_event_loop()
 
-        # Use fixed file sizes for progress bars (2MB for BacDive, 30kB for PhageDive)
-        bacdive_size = 2 * 1024 * 1024  # 2 MB in bytes
-        phagedive_size = 30 * 1024  # 30 kB in bytes
+        bacdive_size = 2 * 1024 * 1024  
+        phagedive_size = 30 * 1024  
         t1 = progress.add_task("BacDive", total=bacdive_size)
         t2 = progress.add_task("PhageDive", total=phagedive_size)
 
@@ -219,7 +198,7 @@ def main():
                     total = 0
                     for line in decoder:
                         buf.write(line + "\n")
-                        total += len(line.encode("utf-8")) + 1  # +1 for newline
+                        total += len(line.encode("utf-8")) + 1  
                         progress.update(task_id, advance=len(line.encode("utf-8")) + 1)
                     buf.seek(0)
                 logger.info(f"Downloaded {desc} in memory")
@@ -239,7 +218,6 @@ def main():
             progress.update(t1, completed=bacdive_size)
             progress.update(t2, completed=phagedive_size)
             logger.info("Parsing BacDive CSV...")
-            # Parse BacDive from in-memory buffer
             bacdive_buf.seek(0)
             reader = csv.reader(bacdive_buf)
             for row in reader:
@@ -292,7 +270,6 @@ def main():
             )
             df_phagedive = df_phagedive.rename({"phagedive_id": "dive_id"})
             df_phagedive = df_phagedive.with_columns([pl.lit("phage").alias("dive_type")])
-            # Union and save
             df_combined = pl.concat([df_bacdive, df_phagedive], how="vertical_relaxed")
             df_combined.write_parquet(DATA_DIR / "dive_combined.parquet")
             logger.info(f"Saved combined data to {DATA_DIR / 'dive_combined.parquet'}")

@@ -1,19 +1,18 @@
 import os
 import subprocess
 import sys
-from itertools import combinations_with_replacement
+from pathlib import Path
 from typing import Iterable, Optional
 
 from UniProtMapper import ProtMapper
 from alphafetcher import AlphaFetcher
-import ete3
 import numpy as np
 import polars as pl
 import taxoniq
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import pdist, squareform
 
-from hoodini.utils.logging_utils import console
+from hoodini.utils.logging_utils import console, success
 from hoodini.utils.seq_io import read_fasta, to_fasta
 
 
@@ -39,7 +38,6 @@ def parse_taxonomy_and_build_tree(
 ):
     os.makedirs(output_dir, exist_ok=True)
 
-    # Map any sequence-like labels to unique_ids so tree leaves match neighborhoods
     uid_map = {}
     if all_neigh is not None and len(all_neigh.columns) > 0:
         cols_available = set(all_neigh.columns)
@@ -57,8 +55,9 @@ def parse_taxonomy_and_build_tree(
                         continue
                     s = str(cand)
                     uid_map[s] = uid
-                    uid_map[os.path.basename(s)] = uid
-                    uid_map[os.path.splitext(os.path.basename(s))[0]] = uid
+                    p = Path(s)
+                    uid_map[p.name] = uid
+                    uid_map[p.stem] = uid
 
     def _map_label(val):
         if val is None:
@@ -66,20 +65,20 @@ def parse_taxonomy_and_build_tree(
         s = str(val)
         return (
             uid_map.get(s)
-            or uid_map.get(os.path.basename(s))
-            or uid_map.get(os.path.splitext(os.path.basename(s))[0])
+            or uid_map.get(Path(s).name)
+            or uid_map.get(Path(s).stem)
             or s
         )
 
     if tree_mode == "taxonomy":
         tree_str = _make_taxonomic_tree(records)
     elif tree_mode == "fast_nj":
-        tree_str = _make_fast_phylo_tree(records, all_prots, output_dir, nj_algorithm)
+        tree_str = _make_fast_phylo_tree(
+            records, all_prots, output_dir, nj_algorithm, threads=num_threads
+        )
     elif tree_mode == "aai_tree":
-        # build tree from AAI/wGRR pairwise table; handle multiple shapes
         chosen = pairwise_aai
         if isinstance(pairwise_aai, tuple) and len(pairwise_aai) >= 2:
-            # Prefer the AAI RBH table when present; fall back to first element
             wgrr_df, aai_df = pairwise_aai[0], pairwise_aai[1]
             if aai_df is not None and not aai_df.is_empty():
                 chosen = aai_df
@@ -129,7 +128,6 @@ def parse_taxonomy_and_build_tree(
             subset_mode=aai_subset_mode,
         )
     elif tree_mode == "ani_tree":
-        # build tree from ANI pairwise table; accept multiple shapes
         if pairwise_ani is None or (hasattr(pairwise_ani, "is_empty") and pairwise_ani.is_empty()):
             raise ValueError("pairwise_ani is empty")
 
@@ -185,7 +183,7 @@ def parse_taxonomy_and_build_tree(
         out.write(tree_str)
 
     den_data = _build_leaf_metadata(records, all_neigh)
-    console.print("\u2714\ufe0f\tTree saved as Newick\n")
+    success("Tree saved as Newick")
     return tree_str, den_data
 
 
@@ -193,52 +191,49 @@ def _build_leaf_metadata(records: pl.DataFrame, all_neigh: pl.DataFrame) -> pl.D
     """Annotate leaf metadata with taxonomy using Polars only."""
     taxcols = ["superkingdom", "kingdom", "phylum", "class", "order", "family", "genus", "species"]
 
-    records_pl = records.collect() if isinstance(records, pl.LazyFrame) else records
-    all_neigh_pl = all_neigh.collect() if isinstance(all_neigh, pl.LazyFrame) else all_neigh
-
-    records_pl = records_pl.with_columns(
+    records = records.with_columns(
         pl.col("taxid").fill_null("32644").cast(pl.Utf8).alias("taxid"),
         pl.col("unique_id").cast(pl.Utf8),
     )
-    all_neigh_pl = all_neigh_pl.with_columns(pl.col("unique_id").cast(pl.Utf8))
+    all_neigh = all_neigh.with_columns(pl.col("unique_id").cast(pl.Utf8))
 
-    # Build taxonomy lookup via taxoniq, guaranteeing all ranks exist
     tax_rows = []
-    for taxid in records_pl.select("taxid").unique().to_series().to_list():
+    for taxid in records.select("taxid").unique().to_series().to_list():
         try:
             t = taxoniq.Taxon(int(str(taxid)))
         except Exception:
             t = taxoniq.Taxon(32644)
         row = {"taxid": str(taxid)}
         for r in t.ranked_lineage:
-            row[r.rank.name] = r.scientific_name
+            rank_name = r.rank.name
+            if rank_name in taxcols:
+                row[rank_name] = r.scientific_name
         for c in taxcols:
             row.setdefault(c, None)
         tax_rows.append(row)
 
     taxdf = (
-        pl.DataFrame(tax_rows)
+        pl.DataFrame(tax_rows, schema={"taxid": pl.Utf8, **{c: pl.Utf8 for c in taxcols}})
         if tax_rows
         else pl.DataFrame([{"taxid": "32644", **{c: None for c in taxcols}}])
     )
 
-    records_pl = records_pl.join(taxdf, on="taxid", how="left")
+    records = records.join(taxdf, on="taxid", how="left")
 
-    # defensively add any still-missing rank columns before filling
-    missing_cols = [c for c in taxcols if c not in records_pl.columns]
+    missing_cols = [c for c in taxcols if c not in records.columns]
     if missing_cols:
-        records_pl = records_pl.with_columns([pl.lit(None).alias(c) for c in missing_cols])
+        records = records.with_columns([pl.lit(None).alias(c) for c in missing_cols])
 
-    records_pl = records_pl.with_columns(
+    records = records.with_columns(
         [
             pl.when(pl.col(c).is_null()).then(pl.lit("unclassified")).otherwise(pl.col(c)).alias(c)
             for c in taxcols
         ]
     )
 
-    den_data = records_pl.select(["unique_id", "og_index"] + taxcols)
+    den_data = records.select(["unique_id", "og_index"] + taxcols)
     den_data = den_data.join(
-        all_neigh_pl.select(
+        all_neigh.select(
             ["unique_id", "start_win", "end_win", "strand_win", "start_target", "end_target"]
         ),
         on="unique_id",
@@ -248,18 +243,22 @@ def _build_leaf_metadata(records: pl.DataFrame, all_neigh: pl.DataFrame) -> pl.D
 
 
 def _make_tree(records, all_prots, output_dir, threads):
-    records_pl = records.collect() if isinstance(records, pl.LazyFrame) else records
-    all_prots_pl = all_prots.collect() if isinstance(all_prots, pl.LazyFrame) else all_prots
 
-    valid = records_pl.filter(pl.col("failed").is_null())
-    prots = valid.select("protein_id").drop_nulls().unique()
-    faa = all_prots_pl.join(prots, left_on="id", right_on="protein_id", how="inner")
+
+    valid = records.filter(pl.col("failed").is_null())
+    prots = (
+        valid.select(["protein_id", "unique_id"])
+        .drop_nulls(subset=["protein_id", "unique_id"])
+        .unique(subset=["unique_id"])
+    )
+    faa = all_prots.join(prots, left_on="id", right_on="protein_id", how="inner")
 
     if "unique_id" not in faa.columns:
         id_to_uid = valid.select(["protein_id", "unique_id"]).drop_nulls()
         faa = faa.join(id_to_uid, left_on="id", right_on="protein_id", how="left")
 
-    faa = faa.unique(subset=["id"])  # one per target protein
+    # ensure one sequence per unique_id (neighborhood) and preserve original mapping
+    faa = faa.unique(subset=["unique_id"])
     to_fasta(faa, "unique_id", "sequence", f"{output_dir}/target_prots.fasta")
     subprocess.run(
         ["famsa", f"{output_dir}/target_prots.fasta", f"{output_dir}/target_prots.aln"],
@@ -275,20 +274,23 @@ def _make_tree(records, all_prots, output_dir, threads):
     return result.stdout
 
 
-def _make_fast_phylo_tree(records, all_prots, output_dir, nj_algorithm):
+def _make_fast_phylo_tree(records, all_prots, output_dir, nj_algorithm, threads: int = 1):
     from hoodini.pipeline.helpers.decenttree_builder import run_decenttree_from_matrix
 
-    records_pl = records.collect() if isinstance(records, pl.LazyFrame) else records
-    all_prots_pl = all_prots.collect() if isinstance(all_prots, pl.LazyFrame) else all_prots
-
-    prots = records_pl.filter(pl.col("failed").is_null()).select("protein_id").drop_nulls().unique()
-    faa = all_prots_pl.join(prots, left_on="id", right_on="protein_id", how="inner")
+    prots = (
+        records.filter(pl.col("failed").is_null())
+        .select(["protein_id", "unique_id"])
+        .drop_nulls(subset=["protein_id", "unique_id"])
+        .unique(subset=["unique_id"])
+    )
+    faa = all_prots.join(prots, left_on="id", right_on="protein_id", how="inner")
 
     if "unique_id" not in faa.columns:
-        id_to_uid = records_pl.select(["protein_id", "unique_id"]).drop_nulls()
+        id_to_uid = records.select(["protein_id", "unique_id"]).drop_nulls()
         faa = faa.join(id_to_uid, left_on="id", right_on="protein_id", how="left")
 
-    faa = faa.unique(subset=["id"])  # one per target protein
+    # one sequence per unique_id; header uses unique_id to match original record
+    faa = faa.unique(subset=["unique_id"])  
     to_fasta(faa, "unique_id", "sequence", f"{output_dir}/target_prots.fasta")
     subprocess.run(
         [
@@ -306,15 +308,18 @@ def _make_fast_phylo_tree(records, all_prots, output_dir, nj_algorithm):
     first_col = dispd.columns[0]
     dispd = dispd.rename({first_col: "id"})
     dispd = dispd.select(["id"] + [c for c in dispd.columns if c != "id"])
-    newick = run_decenttree_from_matrix(dispd, algorithm=nj_algorithm, threads=1)
+    newick = run_decenttree_from_matrix(
+        dispd, algorithm=nj_algorithm, threads=max(1, int(threads or 1))
+    )
     return newick
 
 
 def _make_taxonomic_tree(records):
     valid = records.filter(pl.col("failed").is_null()).with_row_count("_idx")
-    taxids = valid.select("taxid").drop_nulls().unique().to_list()
+    taxids = valid.select("taxid").drop_nulls().unique().to_series().to_list()
     distances = calculate_taxid_distances(taxids, update_db=False)
     uids = valid["unique_id"].to_list()
+    print(valid)
     n = len(uids)
     mat = np.zeros((n, n), dtype=float)
     for a in range(n):
@@ -421,7 +426,6 @@ def _pairwise_to_matrix(
             d = 100.0 - v if value_is_identity else v
             if q not in all_ids:
                 all_ids.append(q)
-                # expand matrix
                 mat_np = np.pad(mat_np, ((0, 1), (0, 1)), constant_values=np.nan)
                 mat_np[-1, -1] = 0.0
                 n = len(all_ids)
@@ -466,7 +470,6 @@ def aai_tree(
     if pairwise_aai is None or pairwise_aai.height == 0:
         raise ValueError("pairwise_aai is empty")
 
-    # Prepare A/B/AAI table expected by run_decenttree_from_table
     df = (
         pairwise_aai.rename({qcol: "A", scol: "B", pcol: "AAI"})
         .with_columns(pl.col("AAI").cast(pl.Float64, strict=False))
@@ -478,11 +481,9 @@ def aai_tree(
     if (df["AAI"].max() or 0) <= 1.0:
         df = df.with_columns((pl.col("AAI") * 100.0).alias("AAI"))
 
-    # disallow hyper mode for AAI-derived trees
     if mode and mode.lower() == "hyper":
         raise ValueError("'hyper' mode is not supported for AAI trees")
 
-    # Use run_decenttree_from_table; fill_missing='max' uses observed max distance for missing
     return run_decenttree_from_table(
         df,
         qcol="A",
@@ -515,7 +516,6 @@ def ani_tree(
     if pairwise_ani is None or pairwise_ani.height == 0:
         raise ValueError("pairwise_ani is empty")
 
-    # Normalize to A, B, ANI columns
     df = (
         pairwise_ani[[qcol, scol, pcol]]
         .rename({qcol: "A", scol: "B", pcol: "ANI"})
@@ -528,17 +528,15 @@ def ani_tree(
     if (df["ANI"].max() or 0) <= 1.0:
         df = df.with_columns((pl.col("ANI") * 100.0).alias("ANI"))
 
-    # Map A/B identifiers to any matching valid_uids (basename or substring) so
-    # DecentTree matrix includes all requested UIDs even when pairwise table
-    # uses filenames produced by fastANI.
     if valid_uids is not None:
         uid_list = [str(x) for x in valid_uids]
         uid_set = set(uid_list)
+
         def _map_val(x: str) -> str:
             s = str(x)
             if s in uid_set:
                 return s
-            b = os.path.basename(s)
+            b = Path(s).name
             if b in uid_set:
                 return b
             for uid in uid_list:
@@ -567,18 +565,49 @@ def ani_tree(
 
 
 def _make_foldmason_tree(records, all_prot, output_dir, threads):
-    prots = records.loc[records["failed"].is_null(), "protein_id"].drop_nulls().unique()
-    targets = records.loc[records["failed"].is_null(), "unique_id"].drop_nulls().to_list()
+    # Normalize inputs to Polars for consistency through the pipeline
+    records = records.collect() if isinstance(records, pl.LazyFrame) else records
+    records = records if isinstance(records, pl.DataFrame) else pl.from_pandas(records)
+    all_prot_pl = all_prot.collect() if isinstance(all_prot, pl.LazyFrame) else all_prot
+    all_prot_pl = all_prot_pl if isinstance(all_prot_pl, pl.DataFrame) else pl.from_pandas(all_prot)
+
+    valid = records.filter(pl.col("failed").is_null())
+    targets = valid.select("protein_id").drop_nulls().unique().to_series().to_list()
+
+    import pandas as pd
+
     mapper = ProtMapper()
-    mapped, no_map = mapper(ids=targets, from_db="EMBL-GenBank-DDBJ_CDS", to_db="UniProtKB")
+    print(targets)
+    mapped_pd, no_map = mapper.get(
+        ids=targets, from_db="EMBL-GenBank-DDBJ_CDS", to_db="UniProtKB"
+    )
+
+    # Check if ALL IDs failed to map - if so, we can't build a foldmason tree
+    if set(no_map) == set(targets):
+        console.print(
+            "[bold red]Error: None of the protein IDs could be mapped to UniProt IDs.[/bold red]"
+        )
+        console.print(
+            "[yellow]Foldmason tree requires AlphaFold structures, which need UniProt IDs.[/yellow]"
+        )
+        console.print("[yellow]Falling back to standard MAFFT alignment tree.[/yellow]")
+        return _make_tree(all_prot, records, output_dir, threads)
+
+    mapped_pd = mapped_pd if mapped_pd is not None else pd.DataFrame()
+    mapped_pl = pl.from_pandas(mapped_pd) if mapped_pd is not None and not mapped_pd.empty else pl.DataFrame()
 
     fetcher = AlphaFetcher(base_savedir=f"{output_dir}/struct")
-    fetcher.add_proteins(mapped["Entry"].unique().to_list())
-    fetcher.fetch_metadata(multithread=True, workers=threads)
+    entries = mapped_pd["Entry"].unique().tolist() if not mapped_pd.empty else []
+    if entries:
+        fetcher.add_proteins(entries)
+        fetcher.fetch_metadata(multithread=True, workers=threads)
+    else:
+        fetcher.failed_ids = []
 
-    no_pdb = mapped[mapped["Entry"].isin(fetcher.failed_ids)]["From"].unique().to_list()
+    no_pdb = mapped_pd[mapped_pd["Entry"].isin(fetcher.failed_ids)]["From"].unique().tolist() if not mapped_pd.empty else []
     no_pdb.extend(no_map)
-    fetcher.download_all_files(pdb=True, cif=False, multithread=True, workers=threads)
+    if entries:
+        fetcher.download_all_files(pdb=True, cif=False, multithread=True, workers=threads)
 
     subprocess.run(
         [
@@ -592,31 +621,38 @@ def _make_foldmason_tree(records, all_prot, output_dir, threads):
     )
 
     if no_pdb:
-        results = all_prot.copy()
-        results[results["id"].isin(no_pdb)][["id", "sequence"]].drop_duplicates().to_fasta(
-            "id", "sequence", f"{output_dir}/no_pdb.fasta"
+        missing_df = (
+            all_prot_pl.filter(pl.col("id").is_in(no_pdb))
+            .select(["id", "sequence"])
+            .unique(subset=["id"])
         )
-        cmd = [
-            "mafft",
-            "--keeplength",
-            "--add",
-            f"{output_dir}/no_pdb.fasta",
-            "--reorder",
-            f"{output_dir}/foldmason_aa.fa",
-        ]
-        with open(f"{output_dir}/target_prots.aln", "w") as out:
-            subprocess.run(cmd, check=True, stdout=out)
+        if missing_df.height > 0:
+            missing_df.to_fasta("id", "sequence", f"{output_dir}/no_pdb.fasta")
+            cmd = [
+                "mafft",
+                "--keeplength",
+                "--add",
+                f"{output_dir}/no_pdb.fasta",
+                "--reorder",
+                f"{output_dir}/foldmason_aa.fa",
+            ]
+            with open(f"{output_dir}/target_prots.aln", "w") as out:
+                subprocess.run(cmd, check=True, stdout=out)
+        else:
+            os.rename(f"{output_dir}/foldmason_aa.fa", f"{output_dir}/target_prots.aln")
     else:
         os.rename(f"{output_dir}/foldmason_aa.fa", f"{output_dir}/target_prots.aln")
 
     aln_df = read_fasta(f"{output_dir}/target_prots.aln")
-    aln_df = aln_df.join(
-        mapped[["From", "Entry"]], left_on="id", right_on="Entry", how="left"
-    ).drop("Entry")
-    aln_df["From"] = aln_df["From"].fillna(aln_df["id"])
-    aln_df.drop_duplicates(subset=["From"]).to_fasta(
-        "From", "sequence", f"{output_dir}/target_prots.aln"
+    mapped_join = (
+        mapped_pl.select([pl.col("From").cast(pl.Utf8), pl.col("Entry").cast(pl.Utf8)])
+        if not mapped_pl.is_empty()
+        else pl.DataFrame({"From": [], "Entry": []}, schema={"From": pl.Utf8, "Entry": pl.Utf8})
     )
+    aln_df = aln_df.join(mapped_join, left_on="id", right_on="Entry", how="left").drop("Entry")
+    aln_df = aln_df.with_columns(pl.col("From").fill_null(pl.col("id")))
+    aln_df = aln_df.unique(subset=["From"])
+    aln_df.to_fasta("From", "sequence", f"{output_dir}/target_prots.aln")
 
     result = subprocess.run(
         ["VeryFastTree", f"{output_dir}/target_prots.aln"], capture_output=True, text=True
@@ -638,24 +674,49 @@ def _linkage_to_newick(linkage, labels):
 
 
 def calculate_taxid_distances(taxids, update_db=False):
-    taxids_str = [str(int(taxid)) for taxid in taxids]
-    ncbi = ete3.NCBITaxa()
-    if update_db:
-        ncbi.update_taxonomy_database()
-    tree = ncbi.get_topology(taxids_str, intermediate_nodes=True)
-    tree_taxids = set()
-    taxid_to_node = {}
-    for node in tree.traverse():
-        taxid = int(node.name)
-        tree_taxids.add(taxid)
-        taxid_to_node[taxid] = node
-
-    taxids_int = [int(taxid) for taxid in taxids_str]
+    """Calculate pairwise taxonomic distances between taxids using taxoniq.
+    
+    Distance is computed as the number of steps to the lowest common ancestor (LCA)
+    from both taxa combined.
+    """
+    import itertools
+    
+    taxids_int = [int(taxid) for taxid in taxids]
+    
+    # Build lineage cache for each taxid
+    lineage_cache = {}
+    for taxid in taxids_int:
+        try:
+            t = taxoniq.Taxon(taxid)
+            # Get full lineage as list of taxids (from species up to root)
+            lineage_cache[taxid] = [ancestor.tax_id for ancestor in t.lineage]
+        except Exception:
+            # Fallback to unclassified if taxid not found
+            lineage_cache[taxid] = [taxid, 1]  # 1 is root
+    
     distances = {}
     for taxid1, taxid2 in itertools.combinations(taxids_int, 2):
-        node1 = taxid_to_node[taxid1]
-        node2 = taxid_to_node[taxid2]
-        distance = tree.get_distance(node1, node2)
+        lineage1 = set(lineage_cache[taxid1])
+        lineage2 = set(lineage_cache[taxid2])
+        
+        # Find lowest common ancestor (first shared taxid in lineages)
+        common = lineage1 & lineage2
+        if not common:
+            # No common ancestor found, use max distance
+            distance = len(lineage_cache[taxid1]) + len(lineage_cache[taxid2])
+        else:
+            # Distance = steps from taxid1 to LCA + steps from taxid2 to LCA
+            # LCA is the one with the highest index (closest to the taxa)
+            lca = None
+            for t in lineage_cache[taxid1]:
+                if t in common:
+                    lca = t
+                    break
+            
+            dist1 = lineage_cache[taxid1].index(lca) if lca in lineage_cache[taxid1] else len(lineage_cache[taxid1])
+            dist2 = lineage_cache[taxid2].index(lca) if lca in lineage_cache[taxid2] else len(lineage_cache[taxid2])
+            distance = dist1 + dist2
+        
         distances[(taxid1, taxid2)] = distance
-
+    
     return distances

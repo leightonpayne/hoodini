@@ -6,16 +6,13 @@ from importlib.resources import files
 from pathlib import Path
 
 import polars as pl
-from rich.console import Console
 
-from hoodini.models.schemas import RECORDS
 from hoodini.pipeline.helpers.fetch_ipg_from_accessions import fetch_ipg_from_accessions
 from hoodini.pipeline.helpers.nuc2asmlen import run_nuc2asmlen
+from hoodini.utils.logging_utils import console, debug, info, warn
 from hoodini.utils.polars_adapters import to_polars
 
 PlDF = pl.DataFrame
-
-console = Console()
 
 
 def safe_collect(lf: pl.LazyFrame) -> PlDF:
@@ -37,7 +34,6 @@ def run_ipg(records_df: PlDF, *, cand_mode: str) -> PlDF:
             return val[0] if val else None
         return val
 
-    # Normalize identifiers to scalar strings; notebook/parquet ingest can yield List dtype.
     norm_exprs = []
     for col in ("protein_id", "nucleotide_id"):
         if col in df.columns:
@@ -47,7 +43,6 @@ def run_ipg(records_df: PlDF, *, cand_mode: str) -> PlDF:
     if norm_exprs:
         df = df.with_columns(norm_exprs)
 
-    # Preserve original query protein_id for later disambiguation
     if "query_protein_id" not in df.columns:
         df = df.with_columns(pl.col("protein_id").alias("query_protein_id"))
 
@@ -60,13 +55,13 @@ def run_ipg(records_df: PlDF, *, cand_mode: str) -> PlDF:
         .map_elements(_is_refseq, return_dtype=pl.Boolean)
         .alias("is_refseq_query")
     )
-    console.print("🔍  Fetching IPG data...")
+    info("🔍  Fetching IPG data...")
     df = _fetch_ipg_data(df, cand_mode)
     _trace_ipg(df, stage="after_fetch_ipg")
-    console.print("🔍  Fetching nucleotide data...")
+    info("🔍  Fetching nucleotide data...")
     df = _fetch_nucleotide_data(df)
     _trace_ipg(df, stage="after_fetch_nuc")
-    console.print("✅  Selecting best IPG records...")
+    info("✅  Selecting best IPG records...")
     df = _select_best_ipg(df, cand_mode)
     _trace_ipg(df, stage="after_select_best")
     df = _finalize_ipg(df, cand_mode)
@@ -78,11 +73,12 @@ def _fill_ipg_polars(records: PlDF, ipg_df: PlDF) -> PlDF:
     if ipg_df.height == 0:
         return records
 
-    # Preserve the protein identifier coming from the IPG hit to disambiguate later
+    if "failed_reason" not in records.columns:
+        records = records.with_columns(pl.lit(None).alias("failed_reason"))
+
     if "ipg_protein_id" not in ipg_df.columns and "protein_id" in ipg_df.columns:
         ipg_df = ipg_df.with_columns(pl.col("protein_id").alias("ipg_protein_id"))
 
-    # Get unique ipg_id per protein_id
     ipg_map = ipg_df.select(["protein_id", "ipg_id"]).unique(subset=["protein_id"])
     records = records.join(ipg_map, on="protein_id", how="left", suffix="_ipg")
 
@@ -94,7 +90,6 @@ def _fill_ipg_polars(records: PlDF, ipg_df: PlDF) -> PlDF:
             .alias("ipg_id")
         ).drop("ipg_id_ipg")
 
-    # Mark as failed when enrichment eligible but no ipg found
     cond = (
         (pl.col("protein_id").is_not_null())
         & (pl.col("failed").is_null())
@@ -103,12 +98,15 @@ def _fill_ipg_polars(records: PlDF, ipg_df: PlDF) -> PlDF:
     )
     records = records.with_columns(
         pl.when(cond)
-        .then(pl.lit("Unable to retrieve IPG"))
+        .then(True)
         .otherwise(pl.col("failed"))
-        .alias("failed")
+        .alias("failed"),
+        pl.when(cond)
+        .then(pl.lit("Unable to retrieve IPG"))
+        .otherwise(pl.col("failed_reason"))
+        .alias("failed_reason"),
     )
 
-    # Join full IPG info
     ipg_cols = [c for c in ipg_df.columns if c not in ["protein_id", "ipg_id"]]
     if "ipg_protein_id" in ipg_df.columns and "ipg_protein_id" not in ipg_cols:
         ipg_cols.append("ipg_protein_id")
@@ -119,7 +117,6 @@ def _fill_ipg_polars(records: PlDF, ipg_df: PlDF) -> PlDF:
             ipg_subset = ipg_df.select(select_cols_present)
             records = records.join(ipg_subset, on="ipg_id", how="left", suffix="_ipg_data")
 
-            # Fill missing values from ipg_data columns
             for col in ipg_cols:
                 ipg_col = f"{col}_ipg_data"
                 if ipg_col in records.columns:
@@ -138,30 +135,29 @@ def _fetch_ipg_data(df: PlDF, cand_mode: str) -> PlDF:
     cond_mask = (
         (pl.col("protein_id").is_not_null())
         & (pl.col("failed").is_null())
-        & (~pl.col("premade"))  # Not premade (null or False)
+        & (~pl.col("premade"))  
     )
 
     proteins = df.filter(cond_mask).select("protein_id").unique().to_series().to_list()
     proteins = [p for p in proteins if p and str(p).strip()]
 
     if not proteins:
-        console.print("ℹ️  No records match conditions for IPG.")
+        info("ℹ️  No records match conditions for IPG.")
         return df
 
     ipg_df = fetch_ipg_from_accessions(proteins)
     if ipg_df.height == 0:
-        console.print("ℹ️  No IPG records found.")
+        info("ℹ️  No IPG records found.")
         return df
-    console.log(f"Fetched {ipg_df.height} IPG records for {len(proteins)} proteins.")
+    info(f"Fetched {ipg_df.height} IPG records for {len(proteins)} proteins.")
 
     assemblies = ipg_df.select("assembly").unique().to_series().to_list()
     assemblies = [a for a in assemblies if a and str(a).strip()]
 
     if not assemblies:
-        console.print("ℹ️  No assemblies found in IPG data.")
+        info("ℹ️  No assemblies found in IPG data.")
         return df
 
-    # Enrich with dive_combined.parquet
     try:
         dive_path = files("hoodini").joinpath("data", "dive_combined.parquet")
         asm_ids = pl.DataFrame({"assembly_id": assemblies})
@@ -171,9 +167,8 @@ def _fetch_ipg_data(df: PlDF, cand_mode: str) -> PlDF:
         if ts.height > 0:
             ipg_df = ipg_df.join(ts, left_on="assembly", right_on="assembly_id", how="left")
     except Exception as e:
-        console.print(f"[WARN] Skipping dive_combined.parquet: {e}")
+        warn(f"Skipping dive_combined.parquet: {e}")
 
-    # Enrich with assembly_summary.parquet
     try:
         summary_path = files("hoodini").joinpath("data", "assembly_summary.parquet")
         asm_ids2 = pl.DataFrame({"assembly_accession": assemblies})
@@ -197,9 +192,8 @@ def _fetch_ipg_data(df: PlDF, cand_mode: str) -> PlDF:
                 summary, left_on="assembly", right_on="assembly_accession", how="left"
             )
     except Exception as e:
-        console.print(f"[WARN] Skipping assembly_summary.parquet: {e}")
+        warn(f"Skipping assembly_summary.parquet: {e}")
 
-    # Normalize column names
     rename_map = {
         "nucleotide accession": "nucleotide_id",
         "assembly": "assembly_id",
@@ -209,10 +203,8 @@ def _fetch_ipg_data(df: PlDF, cand_mode: str) -> PlDF:
     }
     ipg_df = ipg_df.rename({k: v for k, v in rename_map.items() if k in ipg_df.columns})
 
-    # Merge IPG info
     df = _fill_ipg_polars(records=df, ipg_df=ipg_df)
 
-    # Fix assembly prefix consistency
     from hoodini.utils.id_parsing import is_refseq_nuccore, switch_assembly_prefix
 
     def fix_asm(nuc_id: str | None, asm_id: str | None) -> str | None:
@@ -250,16 +242,19 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
     nucs = [n for n in nucs if n and str(n).strip()]
 
     if not nucs:
-        console.print("ℹ️  No nucleotide IDs to fetch.")
+        info("ℹ️  No nucleotide IDs to fetch.")
         return df
 
     base = files("hoodini").joinpath("data")
     contig_path = base / "contig_lengths"
     summary_path = base / "assembly_summary.parquet"
 
-    # Build mapping in Polars
     try:
-        contigs_lf = pl.scan_parquet(contig_path, allow_missing_columns=True).filter(
+        contigs_lf = pl.scan_parquet(
+            contig_path,
+            missing_columns="insert",
+            extra_columns="ignore",
+        ).filter(
             (pl.col("genbankAccession").is_in(nucs)) | (pl.col("refseqAccession").is_in(nucs))
         )
 
@@ -297,10 +292,9 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
         )
 
     except Exception as e:
-        console.print(f"[WARN] Failed Polars fetch in _fetch_nucleotide_data: {e}")
+        warn(f"Failed Polars fetch in _fetch_nucleotide_data: {e}")
         mapping_df = pl.DataFrame()
 
-    # Apply the mapping
     if mapping_df.height > 0:
         mapping_df = mapping_df.with_columns(
             pl.col("assembly_id").cast(pl.Utf8),
@@ -308,7 +302,6 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
             pl.col("genbankAccession").cast(pl.Utf8),
         )
 
-        # RefSeq (GCF) map with normalized key
         gcf_map = (
             mapping_df.filter(pl.col("assembly_id").str.starts_with("GCF_"))
             .select(
@@ -328,7 +321,6 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
             .unique(subset=["nucleotide_id", "nucleotide_id_no_prefix"], keep="first")
         )
 
-        # GenBank (GCA) map
         gca_map = (
             mapping_df.filter(pl.col("assembly_id").str.starts_with("GCA_"))
             .select(
@@ -347,7 +339,6 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
             .unique(subset=["nucleotide_id"], keep="first")
         )
 
-        # Ensure columns exist
         for c in [
             "sequence_length",
             "assembly_id",
@@ -363,7 +354,6 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
                     pl.lit(None).cast(pl.Utf8 if c not in ["taxid"] else pl.Int64).alias(c)
                 )
 
-        # Normalize input nucleotide_id for prefix-less matching
         if "nucleotide_id_no_prefix" not in df.columns:
             df = df.with_columns(
                 pl.col("nucleotide_id")
@@ -371,12 +361,10 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
                 .alias("nucleotide_id_no_prefix")
             )
 
-        # Split rows: with assembly_id (honor IPG) vs without (infer)
         has_asm_mask = df["assembly_id"].is_not_null()
         df_with_asm = df.filter(has_asm_mask)
         df_no_asm = df.filter(~has_asm_mask)
 
-        # For rows with assembly_id from IPG, backfill metadata directly by assembly_id
         if df_with_asm.height > 0:
             asm_meta = mapping_df.select(
                 [
@@ -409,7 +397,6 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
                         .alias(col)
                     ).drop(src)
 
-        # For rows without assembly_id, infer with RefSeq priority, then GenBank fallback
         if df_no_asm.height > 0:
             df_no_asm = df_no_asm.join(
                 gcf_map,
@@ -456,11 +443,9 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
                         .alias(col)
                     ).drop(f"{col}_gca")
 
-        # Combine back (align columns)
         if has_asm_mask.any():
             all_cols = sorted(set(df_with_asm.columns) | set(df_no_asm.columns))
 
-            # Build a simple dtype map from original frames (prefer df types when present)
             dtype_map = {col: df_with_asm[col].dtype for col in df_with_asm.columns}
             for col in df_no_asm.columns:
                 dtype_map.setdefault(col, df_no_asm[col].dtype)
@@ -481,7 +466,6 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
                 how="vertical",
             )
 
-        # If IPG source is INSDC and a GenBank mapping exists, force GCA assembly/metadata
         if "source" in df.columns:
             gca_override = gca_map.with_columns(
                 pl.col("nucleotide_id").str.replace(r"^[A-Z]{2}_", "").alias("nuc_gca_no_prefix")
@@ -534,8 +518,6 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
                             .alias(base)
                         ).drop(src)
 
-        # Fill missing sequence_length via EDirect
-    # Fill missing sequence_length via EDirect
     missing_mask = df.select(pl.col("sequence_length").is_null()).to_series()
     if missing_mask.any():
         to_fetch = df.filter(missing_mask).select("nucleotide_id").unique().to_series().to_list()
@@ -561,7 +543,6 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
                             .alias(col)
                         ).drop(f"{col}_edirect")
 
-                # Backfill taxid/group for new assemblies
                 new_asms = (
                     df.filter(pl.col("assembly_id").is_not_null())
                     .select("assembly_id")
@@ -591,9 +572,8 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
                                         .alias(col)
                                     ).drop(f"{col}_backfill")
                     except Exception as e:
-                        console.print(f"[WARN] Failed backfill join: {e}")
+                        warn(f"Failed backfill join: {e}")
 
-    # Fill start/end for nucleotide input type
     cond = (
         (pl.col("input_type") == "nucleotide")
         & (pl.col("nucleotide_id").is_not_null())
@@ -647,7 +627,6 @@ def _select_best_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
 
     if cand_mode == "any_ipg":
         df_ipg = df_ipg.unique(subset=["ipg_id", "nucleotide_id", "start", "end"], keep="first")
-        # Prefer RefSeq (GCF_) over GenBank (GCA_) when same assembly/start/end appear.
         df_ipg = df_ipg.with_columns(
             pl.col("assembly_id").cast(pl.Utf8, strict=False).alias("assembly_id"),
             pl.col("assembly_id")
@@ -714,8 +693,7 @@ def _select_best_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
 
 def _finalize_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
     """Mark records as failed if they don't meet requirements."""
-    # Ensure all required columns exist
-    for col in ["group", "gff_path", "faa_path", "assembly_id", "failed", "premade"]:
+    for col in ["group", "gff_path", "faa_path", "assembly_id", "failed", "premade", "failed_reason"]:
         if col not in df.columns:
             df = df.with_columns(pl.lit(None).alias(col))
 
@@ -732,9 +710,13 @@ def _finalize_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
     to_fail1 = cond1 & pl.col("assembly_id").is_null()
     df = df.with_columns(
         pl.when(to_fail1)
-        .then(pl.lit("Unable to retrieve IPG/Nuccore data"))
+        .then(True)
         .otherwise(pl.col("failed"))
-        .alias("failed")
+        .alias("failed"),
+        pl.when(to_fail1)
+        .then(pl.lit("Unable to retrieve IPG/Nuccore data"))
+        .otherwise(pl.col("failed_reason"))
+        .alias("failed_reason"),
     )
 
     valid = {"bacteria", "viral", "archaea", "metagenomes"}
@@ -751,17 +733,23 @@ def _finalize_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
     to_invalid = cond2 & (~pl.col("group").is_in(valid))
     df = df.with_columns(
         pl.when(to_invalid)
-        .then(pl.lit("Invalid superkingdom"))
+        .then(True)
         .otherwise(pl.col("failed"))
-        .alias("failed")
+        .alias("failed"),
+        pl.when(to_invalid)
+        .then(pl.lit("Invalid superkingdom"))
+        .otherwise(pl.col("failed_reason"))
+        .alias("failed_reason"),
     )
 
     return df
 
 
 def _trace_ipg(df: pl.DataFrame, stage: str) -> None:
-    """Write a small debug trace of IPG enrichment when HOODINI_IPG_DEBUG is set."""
-    if os.environ.get("HOODINI_IPG_DEBUG") != "1":
+    """Write a small debug trace of IPG enrichment when debug mode is on."""
+    from hoodini.utils.logging_utils import is_debug_enabled
+
+    if not is_debug_enabled():
         return
     cols = [
         "unique_id",

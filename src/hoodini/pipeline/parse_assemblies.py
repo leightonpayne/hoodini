@@ -1,19 +1,24 @@
-# hoodini/parse_assemblies.py
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing as _mp
-from multiprocessing import Pool
 from pathlib import Path
 import sys
+from datetime import datetime
 
 import polars as pl
 import requests
 import requests.adapters
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, SpinnerColumn, TaskProgressColumn
+
+try:
+    from tqdm.notebook import tqdm as tqdm_notebook
+except Exception:  # tqdm may be absent in some environments
+    tqdm_notebook = None
 
 from hoodini.models.schemas import GFF, NEIGHBORHOODS, PROTEINS, RECORDS
 from hoodini.pipeline.helpers.neighborhood_extractor import extract_neighborhood
 from hoodini.pipeline.helpers.prefetch_links import get_prefetched_link_table
-from hoodini.utils.logging_utils import console
+from hoodini.utils.logging_utils import console, info, warn, success, error
 from hoodini.utils.polars_adapters import to_polars
 
 
@@ -28,9 +33,9 @@ def in_jupyter():
 
         shell = get_ipython().__class__.__name__
         if shell == "ZMQInteractiveShell":
-            return True  # Jupyter notebook or qtconsole
+            return True  
         else:
-            return False  # Other type (likely terminal)
+            return False  
     except Exception:
         return False
 
@@ -46,7 +51,6 @@ def _enrich_proteins_with_metadata(
     if all_prots.is_empty():
         return all_prots
 
-    # Add target_prot from records using unique_id
     if "unique_id" in all_prots.columns and "unique_id" in records.columns:
         prot_map = records.select(["unique_id", "protein_id"]).drop_nulls().unique()
         prot_map = prot_map.with_columns(pl.col("unique_id").cast(pl.Utf8))
@@ -56,7 +60,6 @@ def _enrich_proteins_with_metadata(
             prot_map.rename({"protein_id": "target_prot"}), on="unique_id", how="left"
         )
 
-    # Add target_nuc from neighborhoods (seqid is the target_nuc / nucleotide_id)
     if all_neigh is not None and all_neigh.height > 0:
         neigh_meta = all_neigh.select(["unique_id", "seqid"]).drop_nulls().unique()
 
@@ -105,10 +108,8 @@ def run_assembly_parser(
       - "all_gff":   DataFrame of extracted GFF sequences (id, sequence)
       - "all_neigh": DataFrame of neighborhood sequences (seqid, sequence, etc.)
     """
-    # Work on a copy and enforce schema
     records = to_polars(records_df, schema=RECORDS)
 
-    # Infer output directory if not provided, using the same logic as initialize_inputs
     if output_dir is None:
         input_path = None
         if "input_path" in records.columns:
@@ -124,16 +125,57 @@ def run_assembly_parser(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ───────────────────────────────────────────────────────────────────────────────
-    # 1) DOWNLOAD ASSEMBLIES (or use local folder)
-    # ───────────────────────────────────────────────────────────────────────────────
+    # Resolve assembly folder: use provided path or default to output_dir/assembly_folder
+    assembly_folder_path = (
+        Path(assembly_folder).expanduser() if assembly_folder else output_dir / "assembly_folder"
+    ).resolve()
+
     def _download_assemblies(df: pl.DataFrame) -> tuple[pl.DataFrame, str | None]:
-        mask = df["assembly_id"].is_not_null() & df["failed"].is_null()
-        assembly_list = df.filter(mask)["assembly_id"].drop_nulls().unique().to_list()
+        # Only download when we have an assembly_id, not failed, and we lack local files
+        need_gbf = df["gbf_path"].is_null()
+        need_struct = df["gff_path"].is_null() | df["faa_path"].is_null()  # fna optional
+        mask = df["assembly_id"].is_not_null() & df["failed"].is_null() & need_gbf & need_struct
+        assembly_list = (
+            df.filter(mask)["assembly_id"]
+            .drop_nulls()
+            .unique()
+            .to_list()
+        )
+        # Normalize and keep only valid assembly accessions
+        assembly_list = [
+            str(aid).strip()
+            for aid in assembly_list
+            if isinstance(aid, (str, Path)) and str(aid).strip().startswith(("GCA_", "GCF_"))
+        ]
 
         if not assembly_list:
-            console.print("ℹ️  No assemblies to download.")
+            info("ℹ️  No assemblies to download.")
             return df, None
+
+        # If using a provided assembly_folder, reuse already-downloaded GBFFs
+        existing_map = {
+            aid: str(assembly_folder_path / str(aid) / "genomic.gbff")
+            for aid in assembly_list
+            if (assembly_folder_path / str(aid) / "genomic.gbff").exists()
+        }
+        missing = [aid for aid in assembly_list if aid not in existing_map]
+        if existing_map:
+            df = df.with_columns(
+                pl.when(pl.col("assembly_id").cast(pl.Utf8).is_in(list(existing_map.keys())))
+                .then(pl.col("assembly_id").replace(existing_map))
+                .otherwise(pl.col("gbf_path"))
+                .alias("gbf_path")
+            )
+            info(
+                f"✔️  Using {len(existing_map)} cached assemblies from {assembly_folder_path}"
+                + (f" (missing: {missing})" if missing else "")
+            )
+            if not missing:
+                return df, assembly_folder_path
+            # keep only missing for download
+            assembly_list = missing
+        else:
+            info("No cached assemblies found in assembly_folder; downloading all.")
 
         assembly_list_file = output_dir / "assembly_list.txt"
         with open(assembly_list_file, "w") as f:
@@ -149,11 +191,7 @@ def run_assembly_parser(
 
         missing_assemblies = set(assembly_list) - set(gbff_links["assembly_id"].unique())
         if missing_assemblies:
-            console.print(
-                f"[yellow]Warning:[/yellow] The following assembly_ids were not found in the download links: {missing_assemblies}"
-            )
-
-        assembly_folder_path = output_dir / "assembly_folder"
+            warn(f"The following assembly_ids were not found in the download links: {missing_assemblies}")
 
         session = requests.Session()
         total_files = gbff_links.height
@@ -163,9 +201,26 @@ def run_assembly_parser(
 
             pbar = tqdm(total=total_files, desc="Downloading assemblies")
         else:
-            from rich.progress import Progress
+            from rich.progress import (
+                Progress,
+                BarColumn,
+                TextColumn,
+                TimeElapsedColumn,
+                TimeRemainingColumn,
+                SpinnerColumn,
+                TaskProgressColumn,
+            )
 
-            progress = Progress()
+            progress = Progress(
+                TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                BarColumn(bar_width=40),
+                TaskProgressColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+            )
             task = progress.add_task("Downloading assemblies", total=total_files)
             progress.start()
 
@@ -212,9 +267,9 @@ def run_assembly_parser(
         else:
             progress.stop()
 
+        # Polars replace expects primitive scalars; keep value as string path
         gbf_map = {
-            aid: str(Path.cwd() / assembly_folder_path / str(aid) / "genomic.gbff")
-            for aid in assembly_list
+            aid: str(assembly_folder_path / str(aid) / "genomic.gbff") for aid in assembly_list
         }
         df = df.with_columns(
             pl.when(mask)
@@ -223,14 +278,11 @@ def run_assembly_parser(
             .alias("gbf_path")
         )
 
-        console.print(f"✔️  Downloaded or located assemblies (folder: {assembly_folder_path})")
+        success(f"Downloaded or located assemblies (folder: {assembly_folder_path})")
         return df, assembly_folder_path
 
     records, actual_assembly_folder = _download_assemblies(records)
 
-    # ───────────────────────────────────────────────────────────────────────────────
-    # 2) EXTRACT NEIGHBORHOODS (parallel) → all_gff, all_neigh
-    # ───────────────────────────────────────────────────────────────────────────────
     def write_fasta(df: pl.DataFrame, id_col: str, seq_col: str, path: str) -> None:
         with open(path, "w") as fh:
             for row in df.select([id_col, seq_col]).iter_rows(named=True):
@@ -246,6 +298,11 @@ def run_assembly_parser(
         for col in ("start", "end", "strand"):
             if col not in df.columns:
                 df = df.with_columns(pl.lit(None).alias(col))
+        # Ensure failure flag/message columns exist for downstream joins
+        if "failed" not in df.columns:
+            df = df.with_columns(pl.lit(None).alias("failed"))
+        if "failed_reason" not in df.columns:
+            df = df.with_columns(pl.lit(None).alias("failed_reason"))
 
         file_list = []
         for row in df.iter_rows(named=True):
@@ -274,7 +331,7 @@ def run_assembly_parser(
                 )
 
         if not file_list:
-            console.print("ℹ️  No valid records to extract neighborhoods.")
+            info("ℹ️  No valid records to extract neighborhoods.")
             return df, pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), []
 
         df_list: list[pl.DataFrame] = []
@@ -288,17 +345,25 @@ def run_assembly_parser(
         task = None
         try:
             if use_jupyter:
-                from tqdm.notebook import tqdm
-
-                pbar = tqdm(total=len(file_list), desc="Parsing GBFF")
+                if tqdm_notebook is not None:
+                    pbar = tqdm_notebook(total=len(file_list), desc="Parsing GBFF")
+                else:
+                    warn("tqdm not available; falling back to Rich progress.")
+                    use_jupyter = False
             else:
-                from rich.progress import Progress
-
-                progress = Progress()
+                progress = Progress(
+                    TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+                    SpinnerColumn(),
+                    TextColumn("{task.description}"),
+                    BarColumn(bar_width=40),
+                    TaskProgressColumn(),
+                    TextColumn("{task.completed}/{task.total}"),
+                    TimeElapsedColumn(),
+                    TimeRemainingColumn(),
+                )
                 task = progress.add_task("Parsing GBFF", total=len(file_list))
                 progress.start()
 
-            # Use ProcessPoolExecutor with 'spawn' context to avoid fork-related deadlocks
             with ProcessPoolExecutor(
                 max_workers=num_threads, mp_context=_mp.get_context("spawn")
             ) as executor:
@@ -314,7 +379,7 @@ def run_assembly_parser(
                     completed += 1
 
                     try:
-                        res = future.result(timeout=600)  # 10 min timeout per item
+                        res = future.result(timeout=600)  
                         if res[0] is not None:
                             df_list.append(to_polars(res[0]))
                         if res[1] is not None:
@@ -398,7 +463,7 @@ def run_assembly_parser(
                         .unique()
                         .to_list()
                     )
-                else:  # both
+                else:  
                     short_contigs = (
                         all_neigh.filter(
                             ((pl.col("start_target") - pl.col("start_win")) < minwin)
@@ -414,9 +479,7 @@ def run_assembly_parser(
             neigh_dir.mkdir(parents=True, exist_ok=True)
 
             if failed_ids:
-                console.print(
-                    f"[yellow]Failed extractions for {len(failed_ids)} records: {failed_ids}"
-                )
+                warn(f"Failed extractions for {len(failed_ids)} records: {failed_ids}")
 
             if short_contigs:
                 df = (
@@ -424,7 +487,10 @@ def run_assembly_parser(
                         pl.DataFrame(
                             {
                                 "unique_id": short_contigs,
-                                "failed": ["Genomic context shorter than minimum window size"]
+                                "failed": [True] * len(short_contigs),
+                                "failed_reason": [
+                                    "Genomic context shorter than minimum window size"
+                                ]
                                 * len(short_contigs),
                             }
                         ),
@@ -436,18 +502,26 @@ def run_assembly_parser(
                         pl.when(pl.col("failed_short").is_not_null())
                         .then(pl.col("failed_short"))
                         .otherwise(pl.col("failed"))
-                        .alias("failed")
+                        .alias("failed"),
+                        pl.when(pl.col("failed_reason_short").is_not_null())
+                        .then(pl.col("failed_reason_short"))
+                        .otherwise(pl.col("failed_reason"))
+                        .alias("failed_reason"),
                     )
-                    .drop("failed_short")
+                    .drop("failed_short", "failed_reason_short")
                 )
-                console.print(
-                    f"[yellow]{len(short_contigs)} contigs below min window size: {short_contigs}"
-                )
+                warn(f"{len(short_contigs)} contigs below min window size: {short_contigs}")
 
             if failed_ids:
                 df = (
                     df.join(
-                        pl.DataFrame({"unique_id": failed_ids, "failed": failed_msgs}),
+                        pl.DataFrame(
+                            {
+                                "unique_id": failed_ids,
+                                "failed": [True] * len(failed_ids),
+                                "failed_reason": failed_msgs,
+                            }
+                        ),
                         on="unique_id",
                         how="left",
                         suffix="_fail",
@@ -456,9 +530,13 @@ def run_assembly_parser(
                         pl.when(pl.col("failed_fail").is_not_null())
                         .then(pl.col("failed_fail"))
                         .otherwise(pl.col("failed"))
-                        .alias("failed")
+                        .alias("failed"),
+                        pl.when(pl.col("failed_reason_fail").is_not_null())
+                        .then(pl.col("failed_reason_fail"))
+                        .otherwise(pl.col("failed_reason"))
+                        .alias("failed_reason"),
                     )
-                    .drop("failed_fail")
+                    .drop("failed_fail", "failed_reason_fail")
                 )
 
             valid_uids = (
@@ -500,14 +578,20 @@ def run_assembly_parser(
             if subset_gff.height > 0:
                 write_fasta(subset_gff, "id", "sequence", results_fasta)
 
-            console.print("✔️  Extracted neighborhoods and wrote output files.")
+            success("Extracted neighborhoods and wrote output files.")
             return df, all_gff, all_prots, all_neigh, valid_uids
 
         else:
             if failed_ids:
                 df = (
                     df.join(
-                        pl.DataFrame({"unique_id": failed_ids, "failed": failed_msgs}),
+                        pl.DataFrame(
+                            {
+                                "unique_id": failed_ids,
+                                "failed": [True] * len(failed_ids),
+                                "failed_reason": failed_msgs,
+                            }
+                        ),
                         on="unique_id",
                         how="left",
                         suffix="_fail",
@@ -516,17 +600,20 @@ def run_assembly_parser(
                         pl.when(pl.col("failed_fail").is_not_null())
                         .then(pl.col("failed_fail"))
                         .otherwise(pl.col("failed"))
-                        .alias("failed")
+                        .alias("failed"),
+                        pl.when(pl.col("failed_reason_fail").is_not_null())
+                        .then(pl.col("failed_reason_fail"))
+                        .otherwise(pl.col("failed_reason"))
+                        .alias("failed_reason"),
                     )
-                    .drop("failed_fail")
+                    .drop("failed_fail", "failed_reason_fail")
                 )
             df.write_csv(output_dir / "records.csv", separator=",", quote_style="necessary")
-            console.print("🚫  [bold red]Aborting! All IDs failed to yield neighborhoods.")
+            error("Aborting! All IDs failed to yield neighborhoods.")
             sys.exit(1)
 
     updated_records, all_gff, all_prots, all_neigh, valid_uids = _extract_neighborhoods(records)
 
-    # Enrich proteins with metadata before returning (use updated_records which has all info)
     all_prots = _enrich_proteins_with_metadata(all_prots, updated_records, all_neigh)
 
     if (

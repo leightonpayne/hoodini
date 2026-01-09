@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import csv
-import os
 import re
 from pathlib import Path
-from typing import Optional
 
 import polars as pl
 import rich_click as click
 
 from hoodini.utils.id_parsing import categorize_id
-from hoodini.utils.logging_utils import console
+from hoodini.utils.logging_utils import warn
 
 
 def validate_input_file(ctx, param, value):
@@ -20,8 +18,9 @@ def validate_input_file(ctx, param, value):
     if value is None:
         return None
 
-    if not os.path.isfile(value):
-        raise click.BadParameter(f"File '{value}' does not exist.")
+    if not Path(value).is_file():
+        # Allow literal IDs/FASTA strings; runner will handle them.
+        return value
 
     try:
         with open(value, "r") as file:
@@ -148,14 +147,13 @@ def validate_domains(ctx, param, value):
         return valid_dbs
 
     except ImportError as e:
-        console.print(f"[yellow]Warning: Could not validate MetaCerberus databases: {e}[/yellow]")
+        warn(f"Could not validate MetaCerberus databases: {e}")
         return value
     except Exception as e:
-        console.print(f"[yellow]Warning: Could not validate MetaCerberus databases: {e}[/yellow]")
+        warn(f"Could not validate MetaCerberus databases: {e}")
         return value
 
 
-# Utility: switch GCA_ <-> GCF_ for an assembly accession
 def switch_assembly_prefix(asm_id):
     if not isinstance(asm_id, str):
         return asm_id
@@ -211,6 +209,7 @@ def read_input_list(filename):
             "nucleotide_id": None,
             "uniprot_id": None,
             "failed": None,
+            "failed_reason": None,
             "gff_path": None,
             "faa_path": None,
             "fna_path": None,
@@ -243,7 +242,8 @@ def read_input_list(filename):
                 record["nucleotide_id"] = category["id"]
                 record["input_type"] = "nucleotide"
         elif category["type"] == "unmatched":
-            record["failed"] = "not valid ID"
+            record["failed"] = True
+            record["failed_reason"] = "not valid ID"
         else:
             if ":" in id_:
                 category = categorize_id(id_.split(":")[0])
@@ -265,14 +265,16 @@ def read_input_list(filename):
                             record["strand"] = "+"
                         record["input_type"] = "nucleotide"
                     else:
-                        record["failed"] = "not valid ID"
+                        record["failed"] = True
+                        record["failed_reason"] = "not valid ID"
                     record["nucleotide_id"] = category["id"]
                     record["input_type"] = "nucleotide"
 
-            record["protein_id"] = category["id"]
-            record["input_type"] = "protein"
+            if record["protein_id"] is None and category.get("id"):
+                record["protein_id"] = category["id"]
+                record["input_type"] = record.get("input_type") or "protein"
         data.append(record)
-    df = pl.DataFrame(data)
+    df = pl.DataFrame(data, infer_schema_length=len(data))
     return df
 
 
@@ -299,10 +301,7 @@ def uniprot2ncbi(df: pl.DataFrame) -> pl.DataFrame:
     if mask.sum() == 0:
         return df
 
-    try:
-        from UniProtMapper import ProtMapper
-    except ImportError:
-        return df
+    from UniProtMapper import ProtMapper
 
     df_pd = df.to_pandas()
     to_map = df_pd.loc[mask.to_pandas(), "uniprot_id"].dropna().unique().tolist()
@@ -327,6 +326,7 @@ def uniprot2ncbi(df: pl.DataFrame) -> pl.DataFrame:
 
     if failed_ids:
         failed_mask = df_pd["uniprot_id"].isin(failed_ids)
-        df_pd.loc[failed_mask, "failed"] = "No associated NCBI found for the UniProt entry."
+        df_pd.loc[failed_mask, "failed"] = True
+        df_pd.loc[failed_mask, "failed_reason"] = "No associated NCBI found for the UniProt entry."
 
     return pl.from_pandas(df_pd)

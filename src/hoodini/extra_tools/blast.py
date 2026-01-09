@@ -1,18 +1,18 @@
-import polars as pl
 import subprocess
 import tempfile
 from pathlib import Path
-from hoodini.utils.logging_utils import console
 
+import polars as pl
+
+from hoodini.utils.logging_utils import info
 
 def run_blast(all_neigh, output, blast, num_threads, valid_unique_ids):
     if blast:
-        console.print("🔍\tRunning BLAST annotation...")
+        info("🔍\tRunning BLAST annotation...")
         neighborhood_fasta = f"{output}/neighborhood/neighborhoods.fasta"
         query = blast
 
-        # Create BLAST database
-        console.print("Creating BLAST database...")
+        info("Creating BLAST database...")
         makeblastdb_cmd = [
             "makeblastdb",
             "-in",
@@ -23,8 +23,7 @@ def run_blast(all_neigh, output, blast, num_threads, valid_unique_ids):
         ]
         subprocess.run(makeblastdb_cmd, check=True, capture_output=True)
 
-        # Run BLAST
-        console.print("Running BLAST search...")
+        info("Running BLAST search...")
         with tempfile.NamedTemporaryFile(mode="w+", suffix=".tsv", delete=False) as tmp_out:
             blast_cmd = [
                 "blastn",
@@ -55,7 +54,6 @@ def run_blast(all_neigh, output, blast, num_threads, valid_unique_ids):
             ]
             subprocess.run(blast_cmd, check=True, capture_output=True)
 
-            # Read BLAST results
             try:
                 results_blast = pl.read_csv(
                     tmp_out.name,
@@ -64,7 +62,6 @@ def run_blast(all_neigh, output, blast, num_threads, valid_unique_ids):
                     new_columns=["qseqid", "sseqid", "sstart", "send", "evalue"],
                 )
             except Exception:
-                # Empty results
                 return pl.DataFrame()
             finally:
                 Path(tmp_out.name).unlink(missing_ok=True)
@@ -72,11 +69,9 @@ def run_blast(all_neigh, output, blast, num_threads, valid_unique_ids):
         if results_blast.height == 0:
             return pl.DataFrame()
 
-        # Convert all_neigh to polars if needed
         if not isinstance(all_neigh, pl.DataFrame):
             all_neigh = pl.from_pandas(all_neigh)
 
-        # Filter valid records
         valid = all_neigh.filter(
             pl.col("unique_id").cast(pl.Utf8).is_in([str(n) for n in valid_unique_ids])
         ).select(
@@ -93,18 +88,15 @@ def run_blast(all_neigh, output, blast, num_threads, valid_unique_ids):
             ]
         )
 
-        # Join with results
         results_blast = results_blast.join(
             valid, left_on="sseqid", right_on="temp_seqid", how="left"
         )
 
-        # Add computed columns
         results_blast = results_blast.with_columns(
             (pl.col("sstart") + pl.col("start_win")).alias("start"),
             (pl.col("send") + pl.col("start_win")).alias("end"),
         )
 
-        # Rename and add prefix
         results_blast = results_blast.rename({"qseqid": "nc_feature"})
         results_blast = results_blast.with_columns(
             ("BLAST " + pl.col("nc_feature")).alias("nc_feature"),

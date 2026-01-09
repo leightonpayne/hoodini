@@ -1,4 +1,3 @@
-# hoodini/__main__.py
 
 from hoodini.cli import main
 

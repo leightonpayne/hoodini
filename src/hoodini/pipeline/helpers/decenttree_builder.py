@@ -59,7 +59,6 @@ def _normalize_algorithm(name: str) -> str:
     }
     if n in mapping:
         return mapping[n]
-    # If user already passed a likely valid token (case-insensitive), try upper-casing
     cand = str(name).upper()
     return cand
 
@@ -73,13 +72,9 @@ def _build_relaxed_phylip(
     and distances will be placed in the appropriate cells. Missing entries will
     be set to 0 (or a large value if you prefer).
     """
-    # If ids is provided, use it as the full set of sequence IDs for the matrix
-    # Otherwise, use all unique IDs found in the DataFrame
     if hasattr(fill_missing, "__iter__") and not isinstance(fill_missing, str):
-        # If fill_missing is a tuple (fill_missing_value, ids)
         fill_value, ids = fill_missing
     else:
-        # Build the complete set of ids from both columns using Polars-only ops
         ids = (
             pl.concat(
                 [
@@ -95,7 +90,6 @@ def _build_relaxed_phylip(
     id_index = {idv: i for i, idv in enumerate(ids)}
     n = len(ids)
 
-    # Determine fill value for missing entries
     if fill_value is None:
         fill_value = 0.0
     elif isinstance(fill_value, str):
@@ -107,7 +101,6 @@ def _build_relaxed_phylip(
         elif sval == "max":
             fill_value = float(vals.max())
         elif sval in ("max+2std", "max_plus_2std", "max+2*std"):
-            # Use max + 2*std to emulate very large distances for missing pairs
             fill_value = float(vals.max()) + 2.0 * float(vals.std())
         elif sval == "min":
             fill_value = float(vals.min())
@@ -119,10 +112,8 @@ def _build_relaxed_phylip(
         except Exception:
             fill_value = 0.0
 
-    # Initialize matrix with fill_value
     mat = [[fill_value] * n for _ in range(n)]
 
-    # Build a lookup for distances (dict keyed by (q, t))
     df_lookup = dict(
         zip(
             zip(df[qcol].to_list(), df[tcol].to_list()),
@@ -130,10 +121,8 @@ def _build_relaxed_phylip(
         )
     )
 
-    # Fill matrix with provided distances for all pairs in ids
     for i, q in enumerate(ids):
         for j, t in enumerate(ids):
-            # Try both (q, t) and (t, q) for symmetry
             v = None
             if (q, t) in df_lookup:
                 v = df_lookup.get((q, t))
@@ -146,11 +135,9 @@ def _build_relaxed_phylip(
                 except Exception:
                     pass
 
-    # Ensure parent directory exists before writing the file
     out_path_parent = out_path.parent
     out_path_parent.mkdir(parents=True, exist_ok=True)
 
-    # Write relaxed phylip: first line N, then rows: name \t val1 \t val2 ...
     with open(out_path, "w", newline="") as fh:
         writer = csv.writer(fh, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
         fh.write(f"{n}\n")
@@ -174,12 +161,9 @@ def run_decenttree_from_table(
     if decenttree_bin is None:
         decenttree_bin = _choose_decenttree_binary()
 
-    # Prepare a working DataFrame dt_df that contains qcol, tcol, dcol (distance)
     dt_df = df.clone() if hasattr(df, "clone") else df.select([c for c in df.columns])
 
-    # If the table contains AAI or ANI columns, convert to distance (100 - value).
     if "AAI" in dt_df.columns and dcol not in dt_df.columns:
-        # Convert AAI column to numeric
         try:
             dt_df = dt_df.with_columns(pl.col("AAI").cast(pl.Float64))
         except Exception:
@@ -190,7 +174,6 @@ def run_decenttree_from_table(
         dt_df = dt_df.with_columns((100.0 - pl.col("AAI")).alias("distance"))
         dcol_use = "distance"
     elif "ANI" in dt_df.columns and dcol not in dt_df.columns:
-        # Convert ANI column to numeric
         try:
             dt_df = dt_df.with_columns(pl.col("ANI").cast(pl.Float64))
         except Exception:
@@ -203,12 +186,9 @@ def run_decenttree_from_table(
     else:
         dcol_use = dcol
 
-    # ensure qcol/tcol exist
     if qcol not in dt_df.columns or tcol not in dt_df.columns:
         raise ValueError(f"Input DataFrame must contain columns: {qcol}, {tcol}")
 
-    # Always use ids as the full set of sequence IDs for the matrix if provided
-    # Otherwise, use all unique IDs found in the DataFrame
     if ids is not None:
         valid_uids = [str(x) for x in ids]
     else:
@@ -228,8 +208,6 @@ def run_decenttree_from_table(
         phylip_path = tdpth / "matrix.phylip"
         out_newick = tdpth / "tree.nwk"
 
-    # Build relaxed phylip using all possible pairs from valid_uids
-    # Missing pairs will be filled with the specified fill_value (e.g., max+2std)
     _build_relaxed_phylip(
         dt_df, qcol, tcol, dcol_use, phylip_path, fill_missing=(fill_missing, valid_uids)
     )

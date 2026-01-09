@@ -7,14 +7,12 @@ from importlib.resources import files
 
 import polars as pl
 from rich.prompt import Prompt
-from rich.console import Console
 
 from hoodini.models.schemas import RECORDS
 from hoodini.utils.polars_adapters import to_polars
 from hoodini.utils.validation import read_input_list, read_input_sheet, uniprot2ncbi
-from hoodini.download.assembly_summary import download_assembly_db
-
-console = Console()
+from hoodini.utils.logging_utils import console, error, info, warn, prompt
+from hoodini.pipeline.helpers.single_query import prepare_single_query_input
 
 
 def initialize_inputs(
@@ -23,6 +21,8 @@ def initialize_inputs(
     inputsheet: Optional[Union[Path, str]] = None,
     output: Optional[Union[Path, str]] = None,
     force: bool = False,
+    remote_evalue: float = 1e-5,
+    remote_max_targets: int = 100,
 ) -> pl.DataFrame:
     """
     Initialize the working directory and read the user’s input records (Polars).
@@ -35,7 +35,6 @@ def initialize_inputs(
     """
     check_assembly_db()
 
-    # Step 1: Determine output folder
     if output:
         output_folder = Path(output)
     elif input_path:
@@ -43,43 +42,50 @@ def initialize_inputs(
     elif inputsheet:
         output_folder = Path(inputsheet).with_suffix("")
     else:
-        console.print(
-            "[bold red]Error:[/bold red] Either `input_path` or `inputsheet` must be provided."
-        )
+        error("Either `input_path` or `inputsheet` must be provided.")
         sys.exit(1)
 
-    # Step 2: Create or overwrite folder
     if output_folder.exists():
         if force:
-            console.print(f"🗑️  Overwriting existing folder [bold]{output_folder}[/bold].")
+            warn(f"Overwriting existing folder {output_folder}.")
             shutil.rmtree(output_folder)
         else:
-            console.print(f"⚠️  Folder [bold]{output_folder}[/bold] already exists.")
-            answer = _prompt_yes_no("⌨️  Remove it? (y/N)", default="no")
+            warn(f"Folder {output_folder} already exists.")
+            answer = _prompt_yes_no("⌨️  Remove it?", default="y/N")
             if not answer:
-                console.print(f"[bold red]Aborting:[/bold red] Folder not modified.")
+                error("Aborting: Folder not modified.")
                 sys.exit(1)
             shutil.rmtree(output_folder)
 
     output_folder.mkdir(parents=True, exist_ok=True)
-    console.print(f"[green]✔️  Created folder [bold]{output_folder}[/bold].[/green]\n")
+    info(f"✔️  Created folder {output_folder}")
 
-    # Step 3: Read input records
+    # If input_path is a literal (not a file), build a temp list inside the output folder.
+    if input_path and not Path(input_path).exists():
+        temp_input = prepare_single_query_input(
+            str(input_path),
+            output_folder,
+            evalue=remote_evalue,
+            max_targets=remote_max_targets,
+        )
+        if not temp_input:
+            error("Failed to prepare input from single query; aborting.")
+            sys.exit(1)
+        input_path = str(temp_input)
+
     if inputsheet:
         records_raw = read_input_sheet(inputsheet)
     elif input_path:
         records_raw = read_input_list(input_path)
     else:
-        console.print("[bold red]Error:[/bold red] No input_path or inputsheet provided.")
+        error("No input_path or inputsheet provided.")
         sys.exit(1)
 
-    # Step 4: Convert UniProt → NCBI, drop duplicates (Polars)
     records_pd = uniprot2ncbi(records_raw)
     records = to_polars(records_pd, schema=RECORDS)
 
     records = records.unique(subset=["og_index"], keep="first")
 
-    # Set premade=True for rows that have (gff_path and faa_path) or (gbf_path)
     records = records.with_columns(
         (
             (pl.col("gff_path").is_not_null() & pl.col("faa_path").is_not_null())
@@ -103,30 +109,21 @@ def check_assembly_db() -> None:
         if summary_path.exists():
             mtime = datetime.datetime.fromtimestamp(summary_path.stat().st_mtime)
             age = now - mtime
-            console.print(
-                f"📁 Assembly DB found: [bold]{summary_path}[/bold] (updated: {mtime:%Y-%m-%d})"
-            )
+            info(f"📁 Assembly DB found: {summary_path} (updated: {mtime:%Y-%m-%d})")
             if age > one_month:
-                console.print(
-                    f"[bold yellow]⚠️  WARNING: The assembly database is older than 30 days.[/bold yellow]"
-                )
-                console.print(
-                    "[yellow]To update the database, run: [bold]hoodini update assembly_summary[/bold][/yellow]\n"
-                )
+                warn("The assembly database is older than 30 days. Run 'hoodini download assembly_summary' to update.")
             else:
-                console.print("✅ Using existing database (less than 1 month old).\n")
+                info("✅ Using existing database (less than 1 month old).")
             return
         else:
-            console.print("📭 No local NCBI assembly summary database found. Downloading now...\n")
+            info("📭 No local NCBI assembly summary database found. Downloading now...")
             from hoodini.download.assembly_summary import download_assembly_summary_db
 
             output_path = download_assembly_summary_db(summary_path)
-            console.print(
-                f"[green]✔️  Downloaded assembly database to [bold]{output_path}[/bold].[/green]\n"
-            )
+            info(f"✔️  Downloaded assembly database to {output_path}")
             return
     except Exception as e:
-        console.print(f"[bold red]❌ Error checking or downloading assembly DB: {e}[/bold red]\n")
+        error(f"Error checking or downloading assembly DB: {e}")
 
 
 def _prompt_yes_no(prompt_text: str, default: str = "no") -> bool:
@@ -134,9 +131,9 @@ def _prompt_yes_no(prompt_text: str, default: str = "no") -> bool:
     valid_yes = {"y", "yes"}
     valid_no = {"n", "no"}
     while True:
-        response = Prompt.ask(prompt_text, default=default).strip().lower()
+        response = prompt(prompt_text, default=default).strip().lower()
         if response in valid_yes:
             return True
         if response in valid_no:
             return False
-        console.print("❗  Please enter 'y' or 'n'.")
+        warn("Please enter 'y' or 'n'.")

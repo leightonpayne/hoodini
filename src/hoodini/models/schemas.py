@@ -32,11 +32,11 @@ class TableSchema:
 
         cast_exprs = []
         for col, dtype in self.required.items():
-            cast_exprs.append(pl.col(col).cast(dtype, strict=False))
+            cast_exprs.append(_cast_column(col, dtype))
         if self.optional:
             for col, dtype in self.optional.items():
                 if col in df.columns:
-                    cast_exprs.append(pl.col(col).cast(dtype, strict=False))
+                    cast_exprs.append(_cast_column(col, dtype))
 
         casted = df.with_columns(cast_exprs)
         if not allow_extra:
@@ -45,7 +45,31 @@ class TableSchema:
         return casted
 
 
-# Core tables
+TRUE_STRINGS = {"true", "1", "yes", "y", "t"}
+FALSE_STRINGS = {"false", "0", "no", "n", "f"}
+
+
+def _cast_column(col: str, dtype: pl.DataType) -> pl.Expr:
+    """Robustly cast columns, with special handling for booleans."""
+
+    if dtype == pl.Boolean:
+        norm = pl.col(col).cast(pl.Utf8, strict=False).str.to_lowercase()
+        return (
+            pl.when(pl.col(col).is_null())
+            .then(None)
+            .otherwise(
+                pl.when(norm.is_in(list(TRUE_STRINGS)))
+                .then(True)
+                .when(norm.is_in(list(FALSE_STRINGS)))
+                .then(False)
+                .otherwise(pl.col(col).cast(pl.Boolean, strict=False))
+            )
+            .alias(col)
+        )
+
+    return pl.col(col).cast(dtype, strict=False)
+
+
 RECORDS = TableSchema(
     name="records",
     required={
@@ -57,6 +81,7 @@ RECORDS = TableSchema(
         "nucleotide_id": pl.Utf8,
         "uniprot_id": pl.Utf8,
         "failed": pl.Boolean,
+        "failed_reason": pl.Utf8,
         "gff_path": pl.Utf8,
         "faa_path": pl.Utf8,
         "fna_path": pl.Utf8,

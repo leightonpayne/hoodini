@@ -1,8 +1,8 @@
-# hoodini/cli.py
 
 import logging
 import os
 import sys
+import warnings
 from typing import Optional
 
 from click.core import ParameterSource
@@ -13,7 +13,14 @@ import tomli
 from hoodini.config import build_runtime_config, load_default_config
 from hoodini.pipeline.runner import run_pipeline
 from hoodini.utils.cli_helpers import MutuallyExclusiveOption
-from hoodini.utils.logging_utils import console, stage_done, stage_header
+from hoodini.utils.logging_utils import (
+    configure_logging,
+    console,
+    header,
+    stage_done,
+    stage_header,
+    success,
+)
 from hoodini.utils.validation import validate_domains, validate_input_file
 
 click.rich_click.USE_RICH_MARKUP = True
@@ -21,11 +28,56 @@ click.rich_click.STYLE_ERRORS_SUGGESTIONS = "yellow"
 click.rich_click.STYLE_HELP_OPTIONS = "bold cyan"
 click.rich_click.STYLE_HELP_OPTIONS_DEFAULTS = "dim"
 
+# Group CLI options by theme
+click.rich_click.OPTION_GROUPS = {
+    "hoodini run": [
+        {
+            "name": "Input/Output",
+            "options": ["--config", "--input", "--inputsheet", "--output", "--force", "--keep"],
+        },
+        {
+            "name": "Performance",
+            "options": ["--max-concurrent-downloads", "--num-threads", "--api-key"],
+        },
+        {
+            "name": "Data Sources",
+            "options": ["--assembly-folder", "--blast"],
+        },
+        {
+            "name": "Neighborhood Window",
+            "options": ["--win-mode", "--win", "--ngenes", "--min-win", "--min-win-type", "--height-factor"],
+        },
+        {
+            "name": "Clustering",
+            "options": ["--cand-mode", "--clust-method"],
+        },
+        {
+            "name": "Tree Construction",
+            "options": ["--tree-mode", "--tree-file"],
+        },
+        {
+            "name": "Pairwise Comparisons",
+            "options": ["--prot-links", "--nt-links", "--ani-mode", "--nt-aln-mode", "--aai-mode", "--aai-subset-mode", "--min-pident"],
+        },
+        {
+            "name": "Remote BLAST",
+            "options": ["--remote-evalue", "--remote-max-targets"],
+        },
+        {
+            "name": "Annotations",
+            "options": ["--padloc", "--deffinder", "--cctyper", "--ncrna", "--genomad", "--sorfs", "--emapper", "--domains"],
+        },
+        {
+            "name": "Logging",
+            "options": ["--quiet", "--debug"],
+        },
+    ],
+}
+
 
 @click.group()
 def cli():
     """🦉 hoodini: gene-centric comparative genomic analysis using publicly available data"""
-    pass
 
 
 @cli.command()
@@ -42,9 +94,9 @@ def cli():
     cls=MutuallyExclusiveOption,
     mutually_exclusive=["inputsheet"],
     default=None,
-    type=click.Path(exists=True),
+    type=str,
     callback=validate_input_file,
-    help="Path to a single-column input file (mutually exclusive with --inputsheet).",
+    help="Path to a single-column input file or a literal protein ID/FASTA (mutually exclusive with --inputsheet).",
 )
 @click.option(
     "--inputsheet",
@@ -65,7 +117,6 @@ def cli():
 @click.option("--api-key", "apikey", help="NCBI API key.")
 @click.option("--num-threads", "num_threads", type=int, help="Number of threads.")
 @click.option("--assembly-folder", "assembly_folder", help="Path to a local assembly folder.")
-@click.option("--assembly-db", "assembly_db", help="Assembly DB path.")
 @click.option("--prot-links", "prot_links", is_flag=True, help="Run pairwise protein comparisons.")
 @click.option("--nt-links", "nt_links", is_flag=True, help="Run pairwise nucleotide comparisons.")
 @click.option("--ani-mode", "ani_mode", help="Choose ANI calculation method.")
@@ -76,9 +127,24 @@ def cli():
     help="Nucleotide alignment mode to use for pairwise comparisons: 'blastn' or 'fastani'.",
 )
 @click.option("--blast", help="BLAST query file to use.")
-@click.option("--cand-mode", "cand_mode", help="Mode for selecting IPG representative.")
-@click.option("--clust-method", "clust_method", help="Protein clustering method.")
-@click.option("--win-mode", "mod", help="Window mode: 'win_nts' or 'win_genes'.")
+@click.option(
+    "--cand-mode",
+    "cand_mode",
+    type=click.Choice(["any_ipg", "best_ipg", "best_id", "one_id", "same_id"]),
+    help="Mode for selecting IPG representative.",
+)
+@click.option(
+    "--clust-method",
+    "clust_method",
+    type=click.Choice(["diamond_deepclust", "deepmmseqs", "jackhmmer", "blastp"]),
+    help="Protein clustering method.",
+)
+@click.option(
+    "--win-mode",
+    "mod",
+    type=click.Choice(["win_nts", "win_genes"]),
+    help="Window mode: 'win_nts' or 'win_genes'.",
+)
 @click.option("--win", "wn", type=int, help="Window size (genes or nucleotides).")
 @click.option("--height-factor", "height_factor", type=int, help="Height factor for plotting.")
 @click.option("--ngenes", type=int, help="Number of genes in context window.")
@@ -89,17 +155,48 @@ def cli():
     type=click.Choice(["total", "upstream", "downstream", "both"]),
     help="Type of min window.",
 )
-@click.option("--tree-mode", "tree_mode", help="Tree building method.")
+@click.option(
+    "--tree-mode",
+    "tree_mode",
+    type=click.Choice(
+        [
+            "taxonomy",
+            "fast_nj",
+            "aai_tree",
+            "ani_tree",
+            "fast_ml",
+            "use_input_tree",
+            "foldmason_tree",
+            "neigh_similarity_tree",
+            "neigh_phylo_tree",
+        ]
+    ),
+    help="Tree building method.",
+)
 @click.option("--tree-file", "tree_file", help="Path to the tree file.")
 @click.option(
     "--aai-mode",
     "aai_mode",
-    help="Mode for AAI tree construction (e.g. 'nj' or 'hyper' — 'hyper' will be rejected for AAI trees).",
+    type=click.Choice(["wgrr", "aai", "hyper", "all"]),
+    help="Mode for AAI/proteome similarity calculation.",
 )
 @click.option(
     "--aai-subset-mode",
     "aai_subset_mode",
-    help="Subset mode to use for AAI tree construction (e.g. 'target_region', 'target_prot', 'window').",
+    type=click.Choice(["target_prot", "target_region", "window"]),
+    help="Subset mode for selecting proteins in AAI tree construction.",
+)
+@click.option(
+    "--remote-evalue",
+    "remote_evalue",
+    type=float,
+    help="E-value for remote BLAST when providing a single protein ID/FASTA as input.",
+)
+@click.option(
+    "--remote-max-targets",
+    "remote_max_targets",
+    type=int,
+    help="Maximum targets to retrieve in remote BLAST for single protein input.",
 )
 @click.option("--padloc", is_flag=True, help="Run PADLOC for antiphage defense.")
 @click.option("--deffinder", is_flag=True, help="Run DefenseFinder for antiphage defense.")
@@ -120,28 +217,46 @@ def cli():
     help="Run eggNOG-mapper (emapper) to annotate proteins and append annotations to protein metadata.",
 )
 @click.option(
-    "--min-prevalence",
-    "min_prevalence",
+    "--min-pident",
+    "min_pident",
     type=float,
-    help="Min prevalence threshold for gene coloring.",
+    default=30.0,
+    help="Minimum percent identity threshold for BLAST hits in wGRR/AAI calculations.",
 )
 @click.option("--keep", is_flag=True, help="Keep temporary files (do not delete).")
 @click.option("--force", is_flag=True, help="Overwrite existing output folder if it exists.")
+@click.option("--quiet", is_flag=True, help="Silence all non-error output.")
+@click.option("--debug", is_flag=True, help="Enable verbose debug logging.")
 @click.pass_context
-def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
+def run(ctx, config_file: Optional[str], quiet: bool, debug: bool, **cli_kwargs) -> None:
     """
     Run hoodini with default parameters or from a config file.
     """
-    logging.basicConfig(level="NOTSET", format="%(message)s", handlers=[RichHandler()])
+    log_level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(level=log_level, format="%(message)s", handlers=[RichHandler()])
+    if not debug:
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("requests").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        warnings.filterwarnings(
+            "ignore",
+            message="pkg_resources is deprecated as an API.*",
+            category=UserWarning,
+        )
+    configure_logging(quiet=quiet, debug=debug)
+    subtitle = "large-scale gene neighborhood analyses that feel like magic"
+    header("hoodini 🦉🎩", subtitle, border_style="light_slate_grey")
+    # Separator just under the top header; width ~ text width
+    sep_width = max(len("hoodini 🦉🎩"), len(subtitle)) + 4
+    bar = "━" * sep_width
+    console.print(f"[light_slate_grey]{bar}[/light_slate_grey]")
 
-    # Load user config file if provided
     file_kwargs = {}
     if config_file:
         with open(config_file, "rb") as f:
             grouped = tomli.load(f)
             file_kwargs = {k: v for section in grouped.values() for k, v in section.items()}
 
-    # Keep only CLI args explicitly set by user
     cli_clean = {}
     for k, v in cli_kwargs.items():
         src = ctx.get_parameter_source(k)
@@ -174,7 +289,6 @@ def run(ctx, config_file: Optional[str], **cli_kwargs) -> None:
 @cli.group()
 def download():
     """Download resources used by Hoodini."""
-    pass
 
 
 @download.command("assembly_summary")
@@ -194,7 +308,6 @@ def download_metacerberus(dbs, force):
     """Download MetaCerberus HMM/TSV databases from OSF.io."""
     from hoodini.download.metacerberus import main as metacerberus_main
 
-    # Treat empty string or 'all' as 'all' (list all, do not download)
     if not dbs or dbs.strip().lower() == "all":
         metacerberus_main(None, force=force)
     else:
@@ -216,7 +329,7 @@ def download_type_dive():
 @click.option(
     "--api-key",
     "api_key",
-    default=os.environ.get("NCBI_API_KEY", None),
+    default=os.environ.get("NCBI_API_KEY"),
     help="NCBI API key (overrides environment variable NCBI_API_KEY).",
 )
 @click.option(
@@ -280,7 +393,6 @@ def download_databases(
 @cli.group()
 def utils():
     """Utility commands for Hoodini (e.g., sequence metadata helpers)."""
-    pass
 
 
 @utils.command("nuc2asmlen")
@@ -300,7 +412,7 @@ def nuc2asmlen(input_file, output_file):
 
     if output_file:
         df.write_csv(output_file, separator="\t")
-        console.print(f"[green]Saved results to {output_file}[/green]")
+        success(f"Saved results to {output_file}")
     else:
         sys.stdout.write(df.write_csv(separator="\t", include_header=False))
 
@@ -328,7 +440,6 @@ def prefetch_links(input_file, output_file, kinds):
         accs = [l.strip() for l in fh if l.strip()]
 
     kinds_list = [k.strip() for k in kinds.split(",") if k.strip()]
-    # pass through api_fallback flag
     df = get_prefetched_link_table(accs, kinds=kinds_list)
     if output_file:
         df.write_csv(
@@ -337,7 +448,7 @@ def prefetch_links(input_file, output_file, kinds):
             include_header=False,
             columns=["assembly_id", "file_type", "link"],
         )
-        console.print(f"[green]Saved prefetched links to {output_file}[/green]")
+        success(f"Saved prefetched links to {output_file}")
     else:
         sys.stdout.write(
             df.write_csv(

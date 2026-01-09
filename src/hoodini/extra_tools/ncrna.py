@@ -1,25 +1,26 @@
-import os
-import polars as pl
 import subprocess
-from Bio import SeqIO
 from importlib.resources import files
-from hoodini.utils.logging_utils import console
+from pathlib import Path
 
+import polars as pl
+from Bio import SeqIO
+
+from hoodini.utils.logging_utils import info, warn
 
 def run_ncrna(all_neigh, den_data, output, num_threads, valid_unique_ids):
-    console.print("🔬\tRunning Infernal for ncRNA annotation...")
-    ncrna_dir = f"{output}/ncrna"
-    if not os.path.exists(ncrna_dir):
-        os.makedirs(ncrna_dir)
+    info("🔬\tRunning Infernal for ncRNA annotation...")
+    output = Path(output)
+    ncrna_dir = output / "ncrna"
+    ncrna_dir.mkdir(parents=True, exist_ok=True)
     cm_path = files("hoodini").joinpath("data", "all.cm")
-    stockholm_file = f"{ncrna_dir}/results.sto"
-    tblout_file = f"{ncrna_dir}/results.txt"
+    stockholm_file = ncrna_dir / "results.sto"
+    tblout_file = ncrna_dir / "results.txt"
     command = [
         "cmsearch",
         "--tblout",
-        tblout_file,
+        str(tblout_file),
         "-A",
-        stockholm_file,
+        str(stockholm_file),
         "-E",
         "0.1",
         "--incE",
@@ -27,7 +28,7 @@ def run_ncrna(all_neigh, den_data, output, num_threads, valid_unique_ids):
         "--cpu",
         str(num_threads),
         cm_path,
-        f"{output}/neighborhood/neighborhoods.fasta",
+        str(output / "neighborhood" / "neighborhoods.fasta"),
     ]
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
     column_names = [
@@ -50,7 +51,7 @@ def run_ncrna(all_neigh, den_data, output, num_threads, valid_unique_ids):
         "inc",
         "desc",
     ]
-    if os.path.getsize(stockholm_file) > 0:
+    if stockholm_file.stat().st_size > 0:
         cmdf = pl.read_csv(
             tblout_file,
             separator=r"\s+",
@@ -81,7 +82,7 @@ def run_ncrna(all_neigh, den_data, output, num_threads, valid_unique_ids):
                 "temp_seqid",
             ]
         ]
-        print(cmdf)
+        info(f"Parsed {len(cmdf)} ncRNA hits from Infernal.")
         cmdf = cmdf.join(valid, left_on="nucid", right_on="temp_seqid", how="left")
         cmdf["start"] = cmdf["seqfrom"] + cmdf["start_win"]
         cmdf["end"] = cmdf["seqto"] + cmdf["start_win"]
@@ -90,11 +91,11 @@ def run_ncrna(all_neigh, den_data, output, num_threads, valid_unique_ids):
         )
         cmdf["nc_feature"] = cmdf["nc_feature"]
         cmdf["unique_id"] = cmdf["unique_id"].astype(str)
-        cmdf.write_csv(f"{ncrna_dir}/ncrna_results.tsv", separator="\t", include_header=False)
+        cmdf.write_csv(ncrna_dir / "ncrna_results.tsv", separator="\t", include_header=False)
         return cmdf
 
     else:
-        console.print(f"[yellow]⚠️  No ncRNA found by Infernal (empty {stockholm_file})[/yellow]")
+        warn(f"No ncRNA found by Infernal (empty {stockholm_file})")
         empty_df = pl.DataFrame()
-        empty_df.write_csv(f"{ncrna_dir}/ncrna_results.tsv", separator="\t", include_header=False)
+        empty_df.write_csv(ncrna_dir / "ncrna_results.tsv", separator="\t", include_header=False)
         return empty_df

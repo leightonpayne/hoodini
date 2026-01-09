@@ -1,7 +1,6 @@
 from __future__ import annotations
 from typing import Optional, Tuple, Union
 import math
-import os
 import concurrent.futures as _fut
 
 import polars as pl
@@ -16,9 +15,6 @@ except Exception:
     _HAS_SCIPY = False
 
 
-# =========================
-# Helpers & normalizers
-# =========================
 
 
 def _ensure_polars(df_or_lazy) -> pl.DataFrame:
@@ -176,14 +172,10 @@ def _compute_subset_protein_ids(
         vals = all_prots.select("target_prot").drop_nulls().unique().to_series().to_list()
         return set([v for v in vals if v is not None])
 
-    # for region/window modes we need coords in all_neigh and features in all_gff
     if not {"seqid", "start_win", "end_win"}.issubset(set(all_neigh.columns)):
         raise ValueError(
             "all_neigh must contain columns: seqid, start_win, end_win for region/window subsetting"
         )
-    # all_gff should contain seqid, start, end and protein id. If no id-like
-    # column exists but there is an `attributes` column, extract `ID=` from it
-    # into a temporary 'id' column so we don't mutate the caller's frame.
     prot_col = None
     for c in ("protein_id", "prot_id", "id"):
         if c in all_gff.columns:
@@ -191,8 +183,6 @@ def _compute_subset_protein_ids(
             break
     if prot_col is None:
         if "attributes" in all_gff.columns:
-            # create a temporary copy with extracted id; do not modify original
-            # Use Polars string extract to capture the ID=... value before semicolon
             temp_gff = all_gff.with_columns(
                 pl.col("attributes").str.extract(r"ID=([^;]+)").alias("id")
             )
@@ -203,25 +193,20 @@ def _compute_subset_protein_ids(
                 "all_gff must contain a protein id column (protein_id/id) or an 'attributes' column with ID= to perform region/window subsetting"
             )
 
-    # build join between gff and neighbourhoods then filter ranges
     neigh = all_neigh.select(["seqid", "start_win", "end_win"]).drop_nulls()
     gff = all_gff.select(["seqid", "start", "end", prot_col]).drop_nulls()
 
     if mode == "window":
         w = int(win or 0)
-        # two supported expansion modes: basepairs (bp / win_nts) or number of genes (genes / win_genes)
         wm = (win_mode or "").lower()
         gene_mode = wm in ("genes", "win_genes", "win-genes", "win_genes", "gene", "win_gene")
         if gene_mode:
-            # assign a gene index per seqid based on start coordinate (0-based)
-            # use ordinal rank over seqid to get deterministic ordering
             gff = gff.with_columns(
                 ((pl.col("start").rank(method="ordinal").over("seqid") - 1).cast(pl.Int64)).alias(
                     "gene_idx"
                 )
             )
 
-            # join and find gene_idx range for features contained in the neighbourhood
             joined = gff.join(neigh, on="seqid", how="inner")
             contained = joined.filter(
                 (pl.col("start") >= pl.col("start_win")) & (pl.col("end") <= pl.col("end_win"))
@@ -234,7 +219,6 @@ def _compute_subset_protein_ids(
             end_idx = max_idx + w
             sel = gff.filter((pl.col("gene_idx") >= start_idx) & (pl.col("gene_idx") <= end_idx))
         else:
-            # bp-mode: expand neighborhood windows by w (basepairs)
             neigh = neigh.with_columns(
                 [
                     (pl.col("start_win") - w).alias("start_exp"),
@@ -249,13 +233,11 @@ def _compute_subset_protein_ids(
                     .alias("start_exp"),
                 ]
             )
-            # perform join on seqid then filter using expanded bounds
             joined = gff.join(neigh, on="seqid", how="inner")
             sel = joined.filter(
                 (pl.col("start") >= pl.col("start_exp")) & (pl.col("end") <= pl.col("end_exp"))
             )
     else:
-        # target_region
         joined = gff.join(neigh, on="seqid", how="inner")
         sel = joined.filter(
             (pl.col("start") >= pl.col("start_win")) & (pl.col("end") <= pl.col("end_win"))
@@ -273,11 +255,10 @@ def _rbh_from_ann(ann: pl.DataFrame) -> pl.DataFrame:
     Tie-breaking: ordinal rank => first occurrence wins within each group.
     Returns columns: query_seq, target_seq, qseqid, sseqid, pident
     """
-    # Best target per (query protein, target seq)
     best_q_to_target = (
         ann.with_columns(
             pl.col("pident")
-            .rank(method="ordinal", descending=True)  # deterministic ties
+            .rank(method="ordinal", descending=True)  
             .over(["qseqid", "t_seq"])
             .alias("_rk")
         )
@@ -292,7 +273,6 @@ def _rbh_from_ann(ann: pl.DataFrame) -> pl.DataFrame:
         )
     )
 
-    # Best query per (target protein, query seq)
     best_t_to_query = (
         ann.with_columns(
             pl.col("pident")
@@ -311,7 +291,6 @@ def _rbh_from_ann(ann: pl.DataFrame) -> pl.DataFrame:
         )
     )
 
-    # Reciprocal join: qseqid chose sseqid AND sseqid chose qseqid
     rbh = best_q_to_target.join(
         best_t_to_query,
         left_on=["qseqid", "sseqid"],
@@ -324,16 +303,13 @@ def _rbh_from_ann(ann: pl.DataFrame) -> pl.DataFrame:
             pl.col("target_seq"),
             pl.col("qseqid"),
             pl.col("sseqid"),
-            pl.col("pident_best_qt").alias("pident"),  # one pident per RBH pair
+            pl.col("pident_best_qt").alias("pident"),  
         ]
     )
 
     return rbh
 
 
-# =========================
-# Metrics (return Polars)
-# =========================
 
 
 def compute_wgrr(
@@ -470,14 +446,12 @@ def compute_vcontact2_hypergeom(
 
     prots = _normalize_proteins_df(prots_raw, require_fam=True)
 
-    # Presence/absence table (unique pairs)
     df_pa = prots.select(["target_nuc", "fam_cluster"]).drop_nulls().unique()
     if df_pa.is_empty():
         return pl.DataFrame(
             columns=["query_seq", "target_seq", "k", "K_A", "K_B", "M", "pval", "p_adj", "score"]
         )
 
-    # Filter ubiquitous families by document frequency
     fam_counts = df_pa.group_by("fam_cluster").agg(pl.len().alias("df"))
     Nseqs = df_pa["target_nuc"].n_unique()
     keep_thresh = int(math.ceil(max_df_frac * max(1, Nseqs)))
@@ -489,14 +463,10 @@ def compute_vcontact2_hypergeom(
 
     df_pa = df_pa.join(keep_fams, on="fam_cluster", how="inner")
 
-    # K_A, K_B (num fams per sequence after filtering)
     sizes = df_pa.group_by("target_nuc").agg(pl.col("fam_cluster").n_unique().alias("K"))
 
-    # Total number of families kept
     M = int(df_pa["fam_cluster"].n_unique())
 
-    # --- Build all unordered sequence pairs sharing a family via a single self-join ---
-    # (query_seq, target_seq) with query_seq < target_seq to avoid duplicates; count families => k
     pairs = (
         df_pa.join(df_pa, on="fam_cluster", how="inner", suffix="_r")
         .filter(pl.col("target_nuc") < pl.col("target_nuc_r"))
@@ -534,7 +504,6 @@ def compute_vcontact2_hypergeom(
             ]
         )
 
-    # Hypergeometric survival function (P[X >= k])
     try:
         k_vals = pairs["k"].to_numpy()
         Ka = pairs["K_A"].to_numpy()
@@ -584,9 +553,6 @@ def compute_vcontact2_hypergeom(
     return pairs.rename({"query_seq": "qseqid", "target_seq": "sseqid"})
 
 
-# =========================
-# Orchestrator (mode selection) with optional parallelism
-# =========================
 
 
 def run_proteome_similarity(
@@ -601,6 +567,7 @@ def run_proteome_similarity(
     win: Optional[int] = None,
     win_mode: str = "bp",
     parallel: bool = False,
+    num_threads: Optional[int] = None,
 ) -> Union[pl.DataFrame, Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]]:
     """
     Compute wGRR, AAI (RBH), and/or vContact2-like hypergeometric scores.
@@ -614,6 +581,7 @@ def run_proteome_similarity(
     pident_min : identity threshold for hits (default 30.0)
     mode : {'wgrr','aai','hyper','all'}
     parallel : if True and mode='all', run metrics concurrently (3 threads)
+    num_threads : optional override for parallel thread pool size (defaults to 3 when parallel=True)
 
     Returns
     -------
@@ -624,7 +592,6 @@ def run_proteome_similarity(
     if mode not in valid:
         raise ValueError(f"Invalid mode='{mode}'. Choose from {sorted(valid)}")
 
-    # normalize once to Polars internally
     all_prots_pl = _ensure_polars(all_prots)
     pairwise_aa_pl = _ensure_polars(pairwise_aa)
     all_neigh_pl = None
@@ -634,19 +601,11 @@ def run_proteome_similarity(
     if all_gff is not None:
         all_gff_pl = _ensure_polars(all_gff)
 
-    # Prefer neighborhood-wise calculations: if the proteins table contains a
-    # 'unique_id' column, treat that as the sequence unit for all grouping and
-    # RBH calculations so results are reported per-neighborhood (unique_id).
-    # If 'unique_id' is missing but `all_neigh` is provided, attempt to map
-    # target_nuc (seqid/temp_seqid) -> unique_id for seqids that map to a
-    # single neighborhood to avoid ambiguous cross-products.
     try:
         if "unique_id" in set(all_prots_pl.columns):
             console.log(
                 "run_proteome_similarity: using 'unique_id' from proteins table to compute neighborhood-wise similarities"
             )
-            # overwrite target_nuc with unique_id for downstream grouping/annotation
-            # ensure string type
             all_prots_pl = all_prots_pl.with_columns(
                 pl.col("unique_id").cast(pl.Utf8).alias("target_nuc")
             )
@@ -655,7 +614,6 @@ def run_proteome_similarity(
             and not all_neigh_pl.is_empty()
             and "target_nuc" in set(all_prots_pl.columns)
         ):
-            # build mapping from temp_seqid and seqid -> unique_id where unambiguous
             if {"temp_seqid", "seqid", "unique_id"}.intersection(all_neigh_pl.columns):
                 an_pl = all_neigh_pl.select(
                     [c for c in ["temp_seqid", "seqid", "unique_id"] if c in all_neigh_pl.columns]
@@ -722,36 +680,31 @@ def run_proteome_similarity(
     except Exception as e:
         console.log(f"run_proteome_similarity: neighborhood remapping skipped due to error: {e}")
 
-    # If subsetting requested, compute set of protein IDs and filter both tables
     if subset_mode:
         if all_neigh_pl is None or all_gff_pl is None:
             raise ValueError("subset_mode requires both all_neigh and all_gff to be provided")
         keep_ids = _compute_subset_protein_ids(
             all_prots_pl, all_neigh_pl, all_gff_pl, subset_mode, win=win, win_mode=win_mode
         )
-        # filter all_prots
         if keep_ids:
             pid_col = _find_prot_id_col(all_prots_pl)
             all_prots_pl = all_prots_pl.filter(pl.col(pid_col).is_in(list(keep_ids)))
         else:
-            # nothing to keep; make empty frames
             all_prots_pl = all_prots_pl.filter(pl.lit(False))
-        # filter pairwise_aa by qseqid/sseqid matching kept protein ids
         if not pairwise_aa_pl.is_empty():
-            # pairwise_aa expected to have qseqid and sseqid
             if {"qseqid", "sseqid"}.issubset(set(pairwise_aa_pl.columns)):
                 pairwise_aa_pl = pairwise_aa_pl.filter(
                     (pl.col("qseqid").is_in(list(keep_ids)))
                     & (pl.col("sseqid").is_in(list(keep_ids)))
                 )
             else:
-                # cannot subset pairwise file; warn by raising
                 raise ValueError("pairwise_aa must contain qseqid/sseqid to apply subsetting")
 
     wgrr_df = aai_df = vcon_df = None
 
     if mode == "all" and parallel:
-        with _fut.ThreadPoolExecutor(max_workers=3) as ex:
+        max_workers = max(1, int(num_threads)) if num_threads is not None else 3
+        with _fut.ThreadPoolExecutor(max_workers=max_workers) as ex:
             fut_w = ex.submit(compute_wgrr, pairwise_aa_pl, all_prots_pl, pident_min, True, True)
             fut_a = ex.submit(compute_aai_rbh, pairwise_aa_pl, all_prots_pl, pident_min, True)
             fut_h = ex.submit(compute_vcontact2_hypergeom, all_prots_pl, 0.2, 2, "BH")
@@ -785,7 +738,6 @@ def run_proteome_similarity(
     elif mode == "hyper":
         return vcon_df
     else:
-        # 'all' – always return DataFrames even if empty
         if wgrr_df is None:
             wgrr_df = pl.DataFrame(columns=["qseqid", "sseqid", "wGRR_sym", "AAI"])
         if aai_df is None:

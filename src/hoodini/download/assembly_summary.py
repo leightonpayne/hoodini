@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 from typing import List, Optional
 
@@ -49,8 +48,8 @@ def download_assembly_db(
             df = pl.read_csv(
                 file_path,
                 separator="\t",
-                comment_prefix="#",  # skip comment lines
-                has_header=False,  # we assign header manually
+                comment_prefix="#",  
+                has_header=False,  
                 new_columns=header,
                 quote_char=None,
                 null_values="na",
@@ -58,7 +57,6 @@ def download_assembly_db(
             )
         except Exception as e:
             logger.error(f"Failed to parse {file_path}: {e}")
-            # attempt to remove the intermediate file even on failure
             try:
                 Path(file_path).unlink()
             except Exception:
@@ -75,7 +73,6 @@ def download_assembly_db(
 
         dfs.append(df)
         logger.info(f"Done {file_path}")
-        # remove the downloaded txt file to save space
         try:
             Path(file_path).unlink()
         except Exception:
@@ -119,6 +116,7 @@ def download_assembly_summary_db(output_path: Optional[Path] = None) -> Path:
         "replicon_count",
         "scaffold_count",
         "contig_count",
+        "seq_rel_date",
     ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

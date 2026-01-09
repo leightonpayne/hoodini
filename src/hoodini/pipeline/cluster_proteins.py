@@ -6,8 +6,7 @@ import polars as pl
 
 from hoodini.pipeline.helpers.jackhmmer_search import parallel_jackhmmer
 from hoodini.pipeline.helpers.mmseqs_clustering import cluster_with_mmseqs
-from hoodini.utils.logging_utils import console
-from hoodini.utils.merge_helpers import merge_cluster_result
+from hoodini.utils.logging_utils import info, warn
 from hoodini.utils.polars_adapters import to_polars
 
 
@@ -29,13 +28,11 @@ def cluster_proteins(
     Returns:
     - pl.DataFrame with fam_cluster annotations
     """
-    # Convert to Polars if needed
     if isinstance(all_prots, pl.DataFrame):
         all_prots = to_polars(all_prots)
 
-    # Handle empty case
     if all_prots.height == 0:
-        console.print("⚠️\tNo proteins to cluster")
+        warn("No proteins to cluster")
         return all_prots
 
     output_dir = Path(output_dir)
@@ -43,7 +40,6 @@ def cluster_proteins(
 
     faa_path = output_dir / "results.fasta"
 
-    # Generate FASTA file from all_prots using Polars
     def write_fasta(df: pl.DataFrame, id_col: str, seq_col: str, path: Path) -> None:
         with open(path, "w") as fh:
             for row in df.select([id_col, seq_col]).iter_rows(named=True):
@@ -91,14 +87,12 @@ def cluster_proteins(
         clusterdf = parallel_jackhmmer(faa_path)
 
     elif clust_method == "blastp":
-        # make blast db
         tmp_dir = Path(output_dir) / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         db_prefix = tmp_dir / "blastdb"
         subprocess.run(
             ["makeblastdb", "-in", faa_path, "-dbtype", "prot", "-out", str(db_prefix)], check=True
         )
-        # run blastp all-vs-all
         blast_out = tmp_dir / "blastp_results.tsv"
         cmd = [
             "blastp",
@@ -112,16 +106,13 @@ def cluster_proteins(
             str(blast_out),
         ]
         subprocess.run(cmd, check=True)
-        # parse results
         df_blast = pl.read_csv(
             blast_out,
             separator="\t",
             has_header=False,
             new_columns=["qseqid", "sseqid", "bitscore", "evalue", "pident", "length", "qcovs"],
         )
-        # remove self-hits
         df_blast = df_blast[df_blast["qseqid"] != df_blast["sseqid"]]
-        # build clusters via union-find
         parent = {}
 
         def find(x):
@@ -154,16 +145,12 @@ def cluster_proteins(
     else:
         raise ValueError(f"Unsupported clustering method: {clust_method}")
 
-    # Convert clustering result to Polars
     clusterdf_pl = to_polars(clusterdf)
 
-    # Compute cluster sizes
     clusterdf_pl = clusterdf_pl.with_columns(
         pl.col("clu_rep_seq").count().over("clu_rep_seq").alias("clu_size")
     )
 
-    # Build fam_cluster mapping for clusters with size >= 2
-    # Sort by cluster size (descending) and assign integer cluster IDs starting from 1
     rep_to_fam = (
         clusterdf_pl.filter(pl.col("clu_size") >= 2)
         .select(["clu_rep_seq", "clu_size"])
@@ -173,15 +160,12 @@ def cluster_proteins(
         .select(["clu_rep_seq", "fam_cluster"])
     )
 
-    # Join fam_cluster
     clusterdf_pl = clusterdf_pl.join(rep_to_fam, on="clu_rep_seq", how="left")
 
     if sorfs:
-        # Filter out sORFs that don't have fam_cluster
         clusterdf_pl = clusterdf_pl.filter(
             ~((pl.col("member").str.contains("sORF")) & (pl.col("fam_cluster").is_null()))
         )
-        # Remove clusters where all members are from orfipy
         clusterdf_pl = clusterdf_pl.filter(
             ~(
                 pl.col("fam_cluster").count().over("fam_cluster")
@@ -189,7 +173,6 @@ def cluster_proteins(
             )
         )
 
-    # Join with all_prots
     result = all_prots.join(
         clusterdf_pl.select(["member", "fam_cluster"]), left_on="id", right_on="member", how="left"
     )
@@ -197,6 +180,6 @@ def cluster_proteins(
     if "member" in result.columns:
         result = result.drop("member")
 
-    console.print("✔️\tProtein clustering complete")
+    info("✔️\tProtein clustering complete")
 
     return result

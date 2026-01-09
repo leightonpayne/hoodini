@@ -1,11 +1,23 @@
 import collections
+from importlib.resources import files
+from pathlib import Path
+from datetime import datetime
+
 import polars as pl
 import pyhmmer
 from pyhmmer import easel
 from pyhmmer.plan7 import HMMFile
-from hoodini.utils.logging_utils import console
-from importlib.resources import files
-from pathlib import Path
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    BarColumn,
+    TaskProgressColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+    TextColumn,
+)
+
+from hoodini.utils.logging_utils import info, warn
 
 
 def deduplicate_domains(
@@ -93,7 +105,29 @@ def deduplicate_domains(
 
         result_rows.extend(non_overlapping)
 
-    return pl.DataFrame(result_rows) if result_rows else pl.DataFrame()
+    if not result_rows:
+        return pl.DataFrame()
+
+    # Normalize rows to a common schema to avoid dtype mismatches
+    all_keys = set()
+    for row in result_rows:
+        all_keys.update(row.keys())
+    ordered_keys = sorted(all_keys)
+    normalized = [{k: row.get(k) for k in ordered_keys} for row in result_rows]
+
+    # Define expected numeric columns; everything else as Utf8
+    numeric_schema = {
+        "bit_score": pl.Float64,
+        "alignment_length": pl.Float64,
+        "e_value": pl.Float64,
+        "start": pl.Int64,
+        "end": pl.Int64,
+        "cov": pl.Float64,
+        "bit_score*alignment_length": pl.Float64,
+    }
+    schema = {k: numeric_schema.get(k, pl.Utf8) for k in ordered_keys}
+
+    return pl.DataFrame(normalized, schema=schema)
 
 
 def run_domain(
@@ -123,9 +157,7 @@ def run_domain(
         groups = get_db_groups(files_list)
         status = check_downloaded(groups)
     except Exception as e:
-        console.print(
-            f"[bold yellow]Warning: Could not load MetaCerberus database info: {e}[/bold yellow]"
-        )
+        warn(f"Could not load MetaCerberus database info: {e}")
         return domains_data
 
     db_files = []
@@ -142,19 +174,19 @@ def run_domain(
         if tsv_file:
             db_files.append((db, hmm_file, tsv_file))
     if not db_files:
-        console.print("[bold yellow]No valid database files found.[/bold yellow]")
+        warn("No valid database files found.")
         return domains_data
 
     fasta_path = output / "results.fasta"
     if not fasta_path.exists() or fasta_path.stat().st_size == 0:
-        console.print(f"[dim]Generating protein sequences file at {fasta_path}...[/dim]")
+        info(f"Generating protein sequences file at {fasta_path}...")
         try:
             all_prots[["protein_id", "sequence"]].drop_nulls().drop_duplicates(
                 "protein_id"
             ).to_fasta("protein_id", "sequence", fasta_path)
-            console.print(f"[green]✔ Generated {fasta_path}[/green]")
+            info(f"✔ Generated {fasta_path}")
         except Exception as e:
-            console.print(f"[bold yellow]Warning: Could not generate FASTA file: {e}[/bold yellow]")
+            warn(f"Could not generate FASTA file: {e}")
             return domains_data
 
     alphabet = pyhmmer.easel.Alphabet.amino()
@@ -162,9 +194,7 @@ def run_domain(
         with easel.SequenceFile(fasta_path, digital=True, alphabet=alphabet) as seq_file:
             sequences = list(seq_file)
     except Exception as e:
-        console.print(
-            f"[bold yellow]Warning: Could not load sequences from {fasta_path}: {e}[/bold yellow]"
-        )
+        warn(f"Could not load sequences from {fasta_path}: {e}")
         return domains_data
 
     Result = collections.namedtuple(
@@ -183,56 +213,74 @@ def run_domain(
     )
     all_results = []
 
-    # --- FIXED HMMER LOOP ---
-    for db, hmm_path, tsv_path in db_files:
-        console.print(f"🔍\tAnnotating domains for [bold]{db}[/bold] with HMMER...")
-        if hmm_path and Path(hmm_path).exists():
-            try:
-                with HMMFile(str(hmm_path)) as hmm_file:
-                    hmms = list(hmm_file)
-            except Exception as e:
-                console.print(
-                    f"[bold yellow]Warning: Could not load HMM file for {db}: {e}. Skipping.[/bold yellow]"
-                )
-                continue
+    if db_files:
+        ts_col = TextColumn(
+            f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"
+        )
+        info(f"🔍\tAnnotating domains with HMMER: {', '.join([db for db, _, _ in db_files])}")
+        # Load HMMs per DB before starting the progress bar to avoid overlapping logs
+        for db, hmm_path, tsv_path in db_files:
+            if hmm_path and Path(hmm_path).exists():
+                info(f"Loading HMMs for {db} (this can take a moment)...")
+                try:
+                    with HMMFile(str(hmm_path)) as hmm_file:
+                        hmms = list(hmm_file)
+                except Exception as e:
+                    warn(f"Could not load HMM file for {db}: {e}. Skipping.")
+                    continue
 
-            for hits in pyhmmer.hmmsearch(hmms, sequences, cpus=num_threads, E=1e-5):
-                hmm_id = hits.query.name.decode()
-                for hit in hits.included:  # only included hits
-                    protein_id = hit.name.decode()
-                    for domain in hit.domains.included:  # only included domains
-                        start = int(domain.env_from)
-                        end = int(domain.env_to)
-                        length = end - start + 1
-                        target_len = getattr(domain.alignment, "target_length", hit.length)
-                        cov = length / float(target_len)
-                        all_results.append(
-                            Result(
-                                protein_id,
-                                hmm_id,
-                                domain.score,
-                                length,
-                                domain.c_evalue,
-                                start,
-                                end,
-                                cov,
-                                db,
-                            )
-                        )
-        else:
-            console.print(f"[dim]Database {db} has no HMM file, skipping HMMER search.[/dim]")
+                total = len(hmms)
+                if total == 0:
+                    info(f"No HMMs found in {db}, skipping.")
+                    continue
+
+                with Progress(
+                    ts_col,
+                    SpinnerColumn(),
+                    TextColumn(f"{db} domains"),
+                    BarColumn(bar_width=40),
+                    TaskProgressColumn(),
+                    TextColumn("{task.completed}/{task.total}"),
+                    TimeElapsedColumn(),
+                    TimeRemainingColumn(),
+                ) as progress:
+                    task = progress.add_task(db, total=total)
+                    for hits in pyhmmer.hmmsearch(hmms, sequences, cpus=num_threads, E=1e-5):
+                        hmm_id = hits.query.name.decode()
+                        for hit in hits.included:  
+                            protein_id = hit.name.decode()
+                            for domain in hit.domains.included:  
+                                start = int(domain.env_from)
+                                end = int(domain.env_to)
+                                length = end - start + 1
+                                target_len = getattr(domain.alignment, "target_length", hit.length)
+                                cov = length / float(target_len)
+                                all_results.append(
+                                    Result(
+                                        protein_id,
+                                        hmm_id,
+                                        domain.score,
+                                        length,
+                                        domain.c_evalue,
+                                        start,
+                                        end,
+                                        cov,
+                                        db,
+                                    )
+                                )
+                        progress.advance(task, 1)
+            else:
+                info(f"Database {db} has no HMM file, skipping HMMER search.")
 
     if not all_results:
-        console.print("[bold yellow]No domain matches found.[/bold yellow]")
+        warn("No domain matches found.")
         return domains_data
 
     domains_df = pl.DataFrame(all_results)
-    # compute composite score and sort (protein asc, score desc)
     domains_df = domains_df.with_columns(
         (pl.col("bit_score") * pl.col("alignment_length")).alias("bit_score*alignment_length")
     ).sort(["protein_id", "bit_score*alignment_length"], descending=[False, True])
 
-    # --- Merge metadata ---
     all_domains_with_metadata = []
     for db, hmm_path, tsv_path in db_files:
         db_domains = domains_df.filter(pl.col("database") == db)
@@ -269,18 +317,17 @@ def run_domain(
                 )
                 all_domains_with_metadata.append(merged)
             else:
-                console.print(
-                    f"[bold yellow]Warning: Could not find ID column in metadata for {db}. Using domains without metadata.[/bold yellow]"
+                warn(
+                    f"Could not find ID column in metadata for {db}. Using domains without metadata."
                 )
                 all_domains_with_metadata.append(db_domains)
         except Exception as e:
-            console.print(
-                f"[bold yellow]Warning: Could not load metadata for {db}: {e}. Using domains without metadata.[/bold yellow]"
-            )
+            warn(f"Could not load metadata for {db}: {e}. Using domains without metadata.")
             all_domains_with_metadata.append(db_domains)
 
     if all_domains_with_metadata:
-        domains_data = pl.concat(all_domains_with_metadata, how="vertical")
+        # Different domain DBs carry different metadata columns; align by union
+        domains_data = pl.concat(all_domains_with_metadata, how="diagonal")
         if deduplicate and domains_data.height > 0:
             before = domains_data.height
             if "domain_id_clean" not in domains_data.columns:
@@ -314,12 +361,12 @@ def run_domain(
                 max_overlap=max_overlap,
                 per_database=per_database,
             )
-            console.print(
-                f"✔️\tDomain annotation complete: {len(domains_data)} matches from {len(db_files)} databases (deduplicated from {before}).\n"
+            info(
+                f"✔️\tDomain annotation complete: {len(domains_data)} matches from {len(db_files)} databases (deduplicated from {before})."
             )
         else:
-            console.print(
-                f"✔️\tDomain annotation complete: {len(domains_data)} matches from {len(db_files)} databases\n"
+            info(
+                f"✔️\tDomain annotation complete: {len(domains_data)} matches from {len(db_files)} databases"
             )
 
     return domains_data

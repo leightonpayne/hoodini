@@ -16,12 +16,13 @@ import argparse
 import base64
 import zlib
 from typing import Iterable, List, Optional
+import sys
 
 import polars as pl
 import requests
 from importlib.resources import files
 
-from hoodini.utils.logging_utils import console
+from hoodini.utils.logging_utils import console, warn, info
 
 BASE = "https://api.ncbi.nlm.nih.gov/datasets/fetch_h"
 METHOD_SEQ_B64 = "QXNzZW1ibHlEYXRhc2V0SW50ZXJuYWwuR2V0U2VxdWVuY2VSZXBvcnQ"
@@ -97,7 +98,6 @@ def _find_in_json(obj, key: str):
     return None
 
 
-# Local cache for assembly -> ftp_path mapping
 _LOCAL_ASM_MAP: Optional[dict] = None
 
 
@@ -114,9 +114,7 @@ def _load_local_assembly_map() -> dict:
         if not path.exists():
             _LOCAL_ASM_MAP = {}
             return _LOCAL_ASM_MAP
-        # Read minimal columns to reduce memory using Polars
         df = pl.read_parquet(path, columns=["assembly_accession", "ftp_path"])
-        # Convert to dictionary
         _LOCAL_ASM_MAP = dict(
             zip(
                 df["assembly_accession"].cast(pl.Utf8).to_list(),
@@ -154,24 +152,12 @@ def get_prefetched_link(
 
     asm_map = _load_local_assembly_map()
     if asm_id not in asm_map:
-        # assembly not present in assembly_summary
-        if console is not None:
-            console.print(
-                f"[yellow]warning[/yellow] assembly {asm_id} not present in assembly_summary.parquet"
-            )
-        else:
-            print(f"warning: assembly {asm_id} not present in assembly_summary.parquet")
+        warn(f"Assembly {asm_id} not present in assembly_summary.parquet")
         raise KeyError(f"assembly {asm_id} not present")
 
     ftp = asm_map.get(asm_id)
     if not ftp or str(ftp).strip().lower() == "na":
-        # assembly present but no ftp_path available
-        if console is not None:
-            console.print(
-                f"[yellow]warning[/yellow] assembly {asm_id} has no ftp_path in assembly_summary.parquet"
-            )
-        else:
-            print(f"warning: assembly {asm_id} has no ftp_path in assembly_summary.parquet")
+        warn(f"Assembly {asm_id} has no ftp_path in assembly_summary.parquet")
         raise ValueError(f"assembly {asm_id} missing ftp_path")
 
     asm = derive_asm_from_ftp_path(ftp, asm_id)
@@ -198,8 +184,6 @@ def get_prefetched_link_table(
 
     rows = []
 
-    # Fast path: user explicitly requested only sequence_report links; avoid
-    # loading assembly_summary (ftp) entirely.
     if seqrep_only:
         for asm in asm_id_list:
             asm = asm.strip()
@@ -208,30 +192,21 @@ def get_prefetched_link_table(
             try:
                 link = make_seqrep_url(asm)
             except Exception as e:
-                if console is not None:
-                    console.print(f"[yellow]warning[/yellow] skipped {asm} sequence_report: {e}")
-                else:
-                    print(f"warning skipped {asm} sequence_report: {e}")
+                warn(f"Skipped {asm} sequence_report: {e}")
                 continue
             rows.append({"assembly_id": asm, "filetype": "sequence_report", "url": link})
         return pl.DataFrame(rows)
 
-    sess = requests.Session()
+    requests.Session()
     for asm in asm_id_list:
         asm = asm.strip()
         if not asm:
             continue
         for k in kinds:
             try:
-                # get_prefetched_link will load assembly_summary only when
-                # necessary (for non-sequence_report kinds) and will emit
-                # warnings if ftp_path is missing.
                 link = get_prefetched_link(asm, k)
             except Exception as e:
-                if console is not None:
-                    console.print(f"[yellow]warning[/yellow] skipped {asm} {k}: {e}")
-                else:
-                    print(f"warning skipped {asm} {k}: {e}")
+                warn(f"Skipped {asm} {k}: {e}")
                 continue
             rows.append({"assembly_id": asm, "filetype": k, "url": link})
 
@@ -264,13 +239,14 @@ def _cli():
             header=True,
         )
     else:
-        print(
+        sys.stdout.write(
             df.write_csv(
                 separator="\t",
                 include_header=False,
                 columns=["assembly_id", "filetype", "url"],
                 header=True,
             ).rstrip()
+            + "\n"
         )
 
 

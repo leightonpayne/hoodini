@@ -7,7 +7,6 @@ that accepts a typed RuntimeConfig.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import polars as pl
 
@@ -19,20 +18,19 @@ log = logging.getLogger(__name__)
 
 def run_pipeline(config: RuntimeConfig) -> None:
     """Execute the hoodini workflow using the provided config."""
-    # ─── Step 1: Create records dataframe from input and initialize folder ─────────────
     stage_header("Initializing Hoodini", "🚀")
     from hoodini.pipeline.initialize import initialize_inputs
-
     records = initialize_inputs(
         input_path=config.input_path,
         inputsheet=config.inputsheet,
         output=config.output,
         force=config.force,
+        remote_evalue=config.remote_evalue or 1e-5,
+        remote_max_targets=config.remote_max_targets or 100,
     )
 
     stage_done("Initialization complete")
 
-    # ─── Step 2: Fetch IPG data from NCBI ──────────────────────────
     stage_header("Parsing IPG data", "🔍")
     from hoodini.pipeline.parse_ipg import run_ipg
 
@@ -43,13 +41,13 @@ def run_pipeline(config: RuntimeConfig) -> None:
 
     stage_done("IPG parsing complete")
 
-    # ─── Step 3: Fetch assembly data from NCBI and extract neighborhoods ──────────
     stage_header("Downloading and parsing assemblies", "📥")
     from hoodini.pipeline.parse_assemblies import run_assembly_parser
 
     result = run_assembly_parser(
         records_df=records,
         output_dir=config.output,
+        assembly_folder=config.assembly_folder,
         ncrna=config.ncrna,
         cctyper=config.cctyper,
         genomad=config.genomad,
@@ -72,7 +70,15 @@ def run_pipeline(config: RuntimeConfig) -> None:
 
     stage_done("Assembly parsing and neighborhood extraction complete")
 
-    # ─── Step 4: Getting protein links ──────────
+    # Abort early if nothing was extracted to avoid downstream errors
+    if (all_prots.is_empty() if hasattr(all_prots, "is_empty") else True) or (
+        all_neigh.is_empty() if hasattr(all_neigh, "is_empty") else True
+    ):
+        from hoodini.utils.logging_utils import error
+
+        error("No neighborhoods/proteins extracted; stopping before taxonomy/trees.")
+        return
+
     if config.tree_mode == "aai_tree" or config.prot_links:
         stage_header("Running all-vs-all protein comparisons", "🦠")
         from hoodini.pipeline.protein_links import run_protein_links
@@ -88,7 +94,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
     else:
         pairwise_aa = None
 
-    # ─── Step 5: Getting pairwise nt comparisons ──────────
     if config.tree_mode == "ani_tree" or config.nt_links:
         stage_header("Running pairwise nucleotide comparisons", "🦠")
         from hoodini.pipeline.pairwise_nt import run_pairwise_nt
@@ -108,7 +113,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
         pairwise_ani = None
         nt_links = None
 
-    # ─── Step 5: Clustering neighbor proteins ──────────
     stage_header("Clustering neighbor proteins", "✨")
     from hoodini.pipeline.cluster_proteins import cluster_proteins
 
@@ -129,7 +133,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
 
     stage_done("Clustering complete")
 
-    # ─── Step 6: Proteome similarity (AAI) ──────────
     if config.tree_mode == "aai_tree":
         from hoodini.pipeline.proteome_similarity import run_proteome_similarity
 
@@ -141,23 +144,19 @@ def run_pipeline(config: RuntimeConfig) -> None:
             all_gff=all_gff,
             outdir=config.output,
             mode=config.aai_mode,
-            pident_min=(
-                config.min_prevalence
-                if hasattr(config, "min_prevalence") and config.min_prevalence is not None
-                else 30.0
-            ),
+            pident_min=config.min_pident,
             subset_mode="target_region",
             win=config.wn,
             win_mode=(
                 config.mod if hasattr(config, "mod") and config.mod is not None else "win_nts"
             ),
+            num_threads=config.num_threads,
         )
 
         stage_done("Proteome similarity complete")
     else:
         pairwise_aai = None
 
-    # ─── Step 7: Extracting taxonomic information ──────────
     stage_header("Extracting taxonomic information", "🦠")
     from hoodini.pipeline.taxonomy import parse_taxonomy_and_build_tree
 
@@ -179,17 +178,14 @@ def run_pipeline(config: RuntimeConfig) -> None:
         pairwise_aai=pairwise_aai,
     )
 
-    # ─── Step 8: Running extra annotation tools ──────────
     stage_header("Running extra annotation tools", "🦠")
 
-    # Domain annotation
     domains_data = None
     if config.domains:
         from hoodini.extra_tools.domain import run_domain
 
         domains_data = run_domain(all_prots, config.output, config.domains, config.num_threads)
 
-    # BLAST annotation
     if config.blast:
         from hoodini.extra_tools.blast import run_blast
 
@@ -212,7 +208,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
             )
             all_gff = pl.concat([all_gff, gff_df], how="vertical")
 
-    # PADLOC annotation
     if config.padloc:
         from hoodini.extra_tools.padloc import run_padloc
 
@@ -220,7 +215,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
         if padloc_df.height > 0:
             all_prots = all_prots.join(padloc_df, on="id", how="left")
 
-    # eggNOG-mapper (emapper) annotation
     if config.emapper:
         from hoodini.extra_tools.emapper import run_emapper
 
@@ -238,7 +232,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
             if "id" in emapper_df.columns and "id" in all_prots.columns:
                 all_prots = all_prots.join(emapper_df, on="id", how="left")
 
-    # DefenseFinder annotation
     if config.deffinder:
         from hoodini.extra_tools.defensefinder import run_defensefinder
 
@@ -246,38 +239,12 @@ def run_pipeline(config: RuntimeConfig) -> None:
         if deffinder_df.height > 0:
             all_prots = all_prots.join(deffinder_df, on="id", how="left")
 
-    # CCTyper annotation
     if config.cctyper:
-        from hoodini.extra_tools.cctyper import run_cctyper
+        # TODO: re-enable CCTyper once dependencies and invocation are updated; currently disabled.
+        from hoodini.utils.logging_utils import warn
 
-        cctyper_df, crispr_df = run_cctyper(
-            all_gff,
-            all_prots,
-            all_neigh,
-            den_data,
-            config.output,
-            config.num_threads,
-            valid_uids,
-        )
-        if cctyper_df.height > 0:
-            all_prots = all_prots.join(cctyper_df, on="id", how="left")
-        if crispr_df.height > 0:
-            gff_df = pl.DataFrame(
-                {
-                    "seqid": crispr_df["Contig"],
-                    "source": "hoodini",
-                    "type": "region",
-                    "start": crispr_df["start"],
-                    "end": crispr_df["end"],
-                    "score": ".",
-                    "strand": ".",
-                    "phase": ".",
-                    "attributes": "ID=" + crispr_df["nc_feature"] + ";",
-                }
-            )
-            all_gff = pl.concat([all_gff, gff_df], how="vertical")
+        warn("Skipping CCTyper: tool integration is currently outdated and under maintenance.")
 
-    # ncRNA/Infernal annotation
     if config.ncrna:
         from hoodini.extra_tools.ncrna import run_ncrna
 
@@ -298,7 +265,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
             )
             all_gff = pl.concat([all_gff, gff_df], how="vertical")
 
-    # GenoMAD annotation
     if config.genomad:
         from hoodini.extra_tools.genomad import run_genomad
 
@@ -321,7 +287,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
 
     stage_done("Extra annotation complete")
 
-    # Write outputs for viz in a single place
     from hoodini.pipeline.write_data import write_viz_outputs
 
     write_viz_outputs(

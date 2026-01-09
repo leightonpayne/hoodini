@@ -9,10 +9,9 @@ from typing import Optional, Tuple
 import mappy as mp
 import polars as pl
 from Bio import SeqIO
-from rich.progress import Progress
+from rich.progress import Progress, TextColumn, BarColumn, SpinnerColumn, TimeElapsedColumn, TimeRemainingColumn
 
-from hoodini.utils.logging_utils import console
-from hoodini.utils.seq_io import to_fasta
+from hoodini.utils.logging_utils import console, info
 
 def _is_na(x):
     try:
@@ -48,7 +47,6 @@ def _write_intergenic_fasta(
     Returns a DataFrame with columns ['temp_seqid','seqid','start_win'].
     """
 
-    # load GFF into DataFrame with columns seqid,type,start,end
     if all_gff is None:
         raise ValueError("all_gff is required for intergenic FASTA generation")
     if isinstance(all_gff, pl.DataFrame):
@@ -109,9 +107,7 @@ def _write_intergenic_fasta(
                     if e >= s:
                         coding_intervals.append((s, e))
             else:
-                console.log(
-                    f"Warning: no start_win for {canonical}; treating GFF coords as neighborhood-local"
-                )
+                warn(f"No start_win for {canonical}; treating GFF coords as neighborhood-local")
                 for r in cand.iter_rows(named=True):
                     try:
                         s = int(r.get("start"))
@@ -654,7 +650,7 @@ def run_pairwise_nt(
     seq_lengths = _fasta_lengths(str(fasta_path))
 
     if ani_mode is not None and str(ani_mode).lower() == "skani":
-        console.log(f"Running skani triangle on {fasta_path}")
+        info(f"Running skani triangle on {fasta_path}")
         cmd = [
             "skani",
             "triangle",
@@ -665,7 +661,7 @@ def run_pairwise_nt(
             "-t",
             str(threads),
         ]
-        console.print(f"Running: {' '.join(cmd)}")
+        info(f"Running: {' '.join(cmd)}")
         skani_log = out / "skani_triangle.log"
         with open(skani_log, "w") as logfh:
             subprocess.run(cmd, check=True, stdout=logfh, stderr=subprocess.DEVNULL, text=True)
@@ -733,7 +729,7 @@ def run_pairwise_nt(
     ):
         db_prefix = tmp_dir / "db"
         blast_tsv = tmp_dir / "allvsall.outfmt6.tsv"
-        console.log(f"Making BLAST DB at {db_prefix}")
+        info("Building BLAST database for nucleotide comparisons...")
         subprocess.run(
             [
                 "makeblastdb",
@@ -774,7 +770,7 @@ def run_pairwise_nt(
             cmd += ["-perc_identity", str(perc_identity)]
         if word_size:
             cmd += ["-word_size", str(word_size)]
-        console.log("Running BLAST: " + " ".join(cmd))
+        info("Running BLAST nucleotide all-vs-all search...")
         with open(blast_tsv, "w") as fh:
             subprocess.run(cmd, check=True, stdout=fh, stderr=subprocess.PIPE)
 
@@ -828,7 +824,7 @@ def run_pairwise_nt(
                 how="left",
             )
 
-        console.log(f"Raw BLAST HSPs (unique unordered, no self): {hits_blast_df.height}")
+        info(f"Raw BLAST HSPs (unique unordered, no self): {hits_blast_df.height}")
         if write_outputs:
             hits_blast_df.write_csv(
                 tmp_dir / "pairwise_hits_blast.tsv", separator="\t", include_header=False
@@ -965,12 +961,12 @@ def run_pairwise_nt(
 
     if nt_aln_mode and nt_aln_mode.lower() in ("intergenic_blast", "intergenic_blastn"):
         inter_fa = out / "intergenic.fasta"
-        console.log(f"Writing intergenic FASTA to {inter_fa}")
+        info(f"Writing intergenic FASTA to {inter_fa}")
         meta_df = _write_intergenic_fasta(
             all_gff, str(fasta_path), str(inter_fa), all_neigh=all_neigh
         )
         if meta_df.height == 0:
-            console.log("No intergenic sequences produced; exiting")
+            info("No intergenic sequences produced; exiting")
             return (
                 pl.DataFrame(
                     columns=[
@@ -985,7 +981,7 @@ def run_pairwise_nt(
             )
 
         db_prefix = tmp_dir / "intergenic_db"
-        console.log(f"Making BLAST DB for intergenic sequences at {db_prefix}")
+        info(f"Making BLAST DB for intergenic sequences at {db_prefix}")
         subprocess.run(
             ["makeblastdb", "-in", str(inter_fa), "-dbtype", "nucl", "-out", str(db_prefix)],
             check=True,
@@ -1024,7 +1020,7 @@ def run_pairwise_nt(
             "-num_threads",
             str(threads),
         ]
-        console.log("Running intergenic BLAST: " + " ".join(cmd))
+        info("Running intergenic BLAST")
         with open(blast_tsv, "w") as fh:
             subprocess.run(cmd, check=True, stdout=fh, stderr=subprocess.PIPE)
 
@@ -1135,7 +1131,7 @@ def run_pairwise_nt(
             ]
         )
 
-        console.log(f"Intergenic BLAST HSPs (mapped to seqid): {hits_blast_df.height}")
+        info(f"Intergenic BLAST HSPs (mapped to seqid): {hits_blast_df.height}")
         if write_outputs:
             hits_blast_df.write_csv(
                 out / "pairwise_hits_intergenic_blast.tsv", separator="\t", include_header=False
@@ -1360,7 +1356,14 @@ def run_pairwise_nt(
         visual_rows = []
         seen_pairs = set()
 
-        progress = Progress()
+        progress = Progress(
+            TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=40),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+        )
         task = progress.add_task("[cyan]Running pairwise FastANI visualize...", total=len(dfp))
         progress.start()
 
@@ -1552,8 +1555,15 @@ def run_pairwise_nt(
         ]
         rows = []
 
-        with Progress() as progress:
-            task = progress.add_task("[cyan]Running minimap2/mappy...", total=len(plans))
+        with Progress(
+            TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=40),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+        ) as progress:
+            task = progress.add_task("Running minimap2/mappy...", total=len(plans))
             with ProcessPoolExecutor(max_workers=max(1, min(threads, len(plans)))) as ex:
                 futs = [ex.submit(_run_mappy_target_block, p) for p in plans]
                 for fut in as_completed(futs):

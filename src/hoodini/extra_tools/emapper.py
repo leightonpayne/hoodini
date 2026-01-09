@@ -1,11 +1,11 @@
 import subprocess
-import polars as pl
-from hoodini.utils.logging_utils import console
 from importlib.resources import files
 from pathlib import Path
 from shutil import copyfile
+
 import polars as pl
 
+from hoodini.utils.logging_utils import info, warn, success
 
 def run_emapper(all_prots: pl.DataFrame, output: str | Path, num_threads: int = 1) -> pl.DataFrame:
     """
@@ -14,7 +14,7 @@ def run_emapper(all_prots: pl.DataFrame, output: str | Path, num_threads: int = 
     and return one row per input protein as a pandas DataFrame.
     """
 
-    console.print("🧾\tRunning eggNOG-mapper (mmseqs + eggNOG, best+deepest OG via Polars) ...")
+    info("🧾\tRunning eggNOG-mapper (mmseqs + eggNOG, best+deepest OG via Polars) ...")
 
     output = Path(output)
     emapper_dir = output / "emapper"
@@ -23,17 +23,15 @@ def run_emapper(all_prots: pl.DataFrame, output: str | Path, num_threads: int = 
     fasta_path = output / "results.faa"
     fasta_fallback = output / "results.fasta"
 
-    # write FASTA if missing
     if not fasta_path.exists():
         if fasta_fallback.exists():
             copyfile(fasta_fallback, fasta_path)
-            console.print(f"[dim]Copied {fasta_fallback} -> {fasta_path}[/dim]")
+            info(f"Copied {fasta_fallback} -> {fasta_path}")
         else:
             seq_df = all_prots[["id", "sequence"]].drop_nulls().drop_duplicates("id")
             seq_df.to_fasta("id", "sequence", fasta_path)
-            console.print(f"[green]✔ Generated {fasta_path}[/green]")
+            success(f"Generated {fasta_path}")
 
-    # locate mmseqs DB
     mmseqs_dir = files("hoodini").joinpath("data", "emapper", "mmseqs")
     mmseqs_db_padded = str(mmseqs_dir.joinpath("mmseqs.db_pad"))
     mmseqs_db_unpadded = str(mmseqs_dir.joinpath("mmseqs.db"))
@@ -55,31 +53,27 @@ def run_emapper(all_prots: pl.DataFrame, output: str | Path, num_threads: int = 
         ]
         if use_gpu:
             cmd += ["--gpu", "1"]
-        console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
+        info(f"Running: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
-    # try GPU first, fallback CPU
     try:
         run_mmseqs(mmseqs_db_padded, use_gpu=True)
     except subprocess.CalledProcessError:
-        console.print("[yellow]GPU search failed — retrying CPU (padded DB)...[/yellow]")
+        warn("GPU search failed — retrying CPU (padded DB)...")
         try:
             run_mmseqs(mmseqs_db_padded, use_gpu=False)
         except subprocess.CalledProcessError:
-            console.print("[yellow]CPU (padded DB) failed — trying unpadded DB GPU...[/yellow]")
+            warn("CPU (padded DB) failed — trying unpadded DB GPU...")
             try:
                 run_mmseqs(mmseqs_db_unpadded, use_gpu=True)
             except subprocess.CalledProcessError:
-                console.print("[yellow]GPU (unpadded DB) failed — CPU unpadded DB...[/yellow]")
+                warn("GPU (unpadded DB) failed — CPU unpadded DB...")
                 run_mmseqs(mmseqs_db_unpadded, use_gpu=False)
 
     if not results_m8.exists():
-        console.print(
-            f"[bold yellow]Warning: mmseqs results not found at {results_m8}[/bold yellow]"
-        )
+        warn(f"mmseqs results not found at {results_m8}")
         return pl.DataFrame()
 
-    # --- Polars pipeline: read full m8 and pick best hit per query ---
     hits_all = pl.read_csv(
         results_m8,
         has_header=False,
@@ -100,7 +94,6 @@ def run_emapper(all_prots: pl.DataFrame, output: str | Path, num_threads: int = 
         ],
     )
 
-    # best = max bitscore per qseqid, drop mmseqs columns right away
     hits_best = (
         hits_all.sort(["qseqid", "bitscore"], descending=[False, True])
         .group_by("qseqid")
@@ -132,13 +125,11 @@ def run_emapper(all_prots: pl.DataFrame, output: str | Path, num_threads: int = 
 
     annotated = hits_prots.join(og, on=["og", "level"], how="left", suffix="_og").collect()
 
-    # --- Pick deepest OG per query (max taxid) ---
     annotated = annotated.with_columns(pl.col("level").cast(pl.Int64, strict=False))
     annotated = annotated.sort(["qseqid", "level"], descending=[False, True])
     deepest = annotated.group_by("qseqid").head(1)
     deepest = deepest.with_columns(pl.col("level").cast(pl.Utf8))
 
-    # --- Reorder columns ---
     deepest = deepest.rename({"qseqid": "id"})
     exclude_cols = {"level", "nm", "og", "ogs", "orthoindex", "sseqid", "name"}
     lead = ["id", "pname", "description", "COG_categories", "pfam"]
@@ -146,9 +137,9 @@ def run_emapper(all_prots: pl.DataFrame, output: str | Path, num_threads: int = 
     rest = [c for c in deepest.columns if c not in lead_present and c not in exclude_cols]
     deepest = deepest.select(lead_present + rest)
 
-    console.print("🔎 Head of annotated Polars DF (deepest OG per best hit):")
-    console.print(deepest.head(10))
-    console.print(f"shape: {deepest.shape}")
+    info("🔎 Head of annotated Polars DF (deepest OG per best hit):")
+    info(deepest.head(10))
+    info(f"shape: {deepest.shape}")
 
-    console.print(f"[green]✔ mmseqs annotations ready: {deepest.height} queries annotated[/green]")
+    success(f"mmseqs annotations ready: {deepest.height} queries annotated")
     return deepest
