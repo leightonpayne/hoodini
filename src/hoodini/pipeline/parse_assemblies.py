@@ -174,7 +174,7 @@ def     run_assembly_parser(
         assembly_list = [
             str(aid).strip()
             for aid in assembly_list
-            if isinstance(aid, (str, Path)) and str(aid).strip().startswith(("GCA_", "GCF_"))
+            if isinstance(aid, str | Path) and str(aid).strip().startswith(("GCA_", "GCF_"))
         ]
 
         if not assembly_list:
@@ -400,12 +400,10 @@ def     run_assembly_parser(
                     executor.submit(_extract_neighborhood_star, item): idx
                     for idx, item in enumerate(file_list)
                 }
-                completed = 0
 
-                for future in as_completed(futures):
+                for completed, future in enumerate(as_completed(futures), start=1):
                     idx = futures[future]
                     item = file_list[idx]
-                    completed += 1
 
                     try:
                         res = future.result(timeout=600)  

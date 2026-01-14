@@ -291,7 +291,7 @@ def run_domain(
             db_domains = db_domains.with_columns(
                 pl.col("domain_id")
                 .map_elements(
-                    lambda v: v[0] if isinstance(v, (list, tuple)) and len(v) > 0 else v,
+                    lambda v: v[0] if isinstance(v, list | tuple) and len(v) > 0 else v,
                     return_dtype=pl.Utf8,
                 )
                 .alias("domain_id_base")
@@ -334,7 +334,7 @@ def run_domain(
                 domains_data = domains_data.with_columns(
                     pl.col("domain_id")
                     .map_elements(
-                        lambda v: v[0] if isinstance(v, (list, tuple)) and len(v) > 0 else v,
+                        lambda v: v[0] if isinstance(v, list | tuple) and len(v) > 0 else v,
                         return_dtype=pl.Utf8,
                     )
                     .alias("domain_id_base")

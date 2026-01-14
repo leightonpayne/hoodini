@@ -65,9 +65,9 @@ def check_downloaded(groups):
     """Return dict: group -> list of (file, present:bool)"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     status = {}
-    for group, files in groups.items():
+    for group, file_list in groups.items():
         status[group] = []
-        for f in files:
+        for f in file_list:
             dest = DATA_DIR / f["name"]
             status[group].append((f, dest.exists()))
     return status

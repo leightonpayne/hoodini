@@ -892,7 +892,7 @@ def run_pairwise_nt(
                     if ("start_win" in all_neigh.columns and nr.get("start_win") is not None)
                     else 0
                 )
-                for key in {temp, seqid}:
+                for key in (temp, seqid):
                     if not key:
                         continue
                     start_map[key] = start_win
@@ -1483,7 +1483,7 @@ def run_pairwise_nt(
                     if ("start_win" in all_neigh.columns and nr.get("start_win") is not None)
                     else 0
                 )
-                for key in {temp, seqid}:
+                for key in (temp, seqid):
                     if not key:
                         continue
                     id_map[key] = seqid
@@ -1627,7 +1627,7 @@ def run_pairwise_nt(
                     if ("start_win" in all_neigh.columns and nr.get("start_win") is not None)
                     else 0
                 )
-                for key in {temp, seqid}:
+                for key in (temp, seqid):
                     if not key:
                         continue
                     start_map[key] = start_win

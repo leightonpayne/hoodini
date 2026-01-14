@@ -239,7 +239,7 @@ def run_nt_links(
                     else 0
                 )
 
-                for key in {temp, seqid}:
+                for key in (temp, seqid):
                     if not key:
                         continue
                     start_map[key] = start_win

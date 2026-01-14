@@ -51,13 +51,12 @@ def _efetch_chunk(accessions: list[str]) -> str:
         try:
             result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=90)
             if not result.stdout or not result.stdout.strip():
-                if "500" in result.stderr or "ERROR" in result.stderr:
-                    if attempt < max_retries - 1:
-                        warn(
-                            f"efetch error 500/network issue (attempt {attempt+1}/{max_retries}), retrying in 5s..."
-                        )
-                        time.sleep(5)
-                        continue
+                if ("500" in result.stderr or "ERROR" in result.stderr) and attempt < max_retries - 1:
+                    warn(
+                        f"efetch error 500/network issue (attempt {attempt+1}/{max_retries}), retrying in 5s..."
+                    )
+                    time.sleep(5)
+                    continue
                 warn(
                     f"efetch returned empty for IDs: {accessions[:3]}... (stderr: {result.stderr[:200]})"
                 )

@@ -29,27 +29,26 @@ def process_sequence(seq, sequences, max_iterations=3):
 
 
 def run_jackhmmer(faa, cpus=multiprocessing.cpu_count(), max_iterations=3):
-    with pyhmmer.easel.SequenceFile(faa, format="fasta", digital=True) as faa:
-        sequences = faa.read_block()
+    with pyhmmer.easel.SequenceFile(faa, format="fasta", digital=True) as seq_file:
+        sequences = seq_file.read_block()
 
     process_sequence_partial = partial(
         process_sequence, sequences=sequences, max_iterations=max_iterations
     )
 
     dicc_hits = {}
-    with multiprocessing.Pool(cpus) as pool:
-        with Progress(
-            TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-            BarColumn(bar_width=40),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-        ) as progress:
-            task = progress.add_task("Running jackhmmer clustering...", total=len(sequences))
-            for name, hits in pool.imap_unordered(process_sequence_partial, sequences):
-                dicc_hits[name] = hits
-                progress.update(task, advance=1)
+    with multiprocessing.Pool(cpus) as pool, Progress(
+        TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=40),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task = progress.add_task("Running jackhmmer clustering...", total=len(sequences))
+        for name, hits in pool.imap_unordered(process_sequence_partial, sequences):
+            dicc_hits[name] = hits
+            progress.update(task, advance=1)
 
     return dicc_hits
 

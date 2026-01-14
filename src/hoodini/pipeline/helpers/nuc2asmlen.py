@@ -20,7 +20,7 @@ def run_nuc2asmlen(accessions):
     if isinstance(accessions, str):
         with open(accessions) as f:
             query_accessions = [line.strip() for line in f if line.strip()]
-    elif isinstance(accessions, (list, tuple)):
+    elif isinstance(accessions, list | tuple):
         query_accessions = list(accessions)
     else:
         raise ValueError("Expected list of accessions or path to file")
