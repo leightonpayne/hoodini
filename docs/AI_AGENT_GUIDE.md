@@ -61,13 +61,20 @@ Execution notes:
 - `databases`: [hoodini/download/databases.py](../hoodini/download/databases.py) → emapper/mmseqs DB, PADLOC models, DefenseFinder models, GenoMAD DB, eggNOG parquet support.
 
 ## Standard Outputs
-- `defaultGFF.gff`: combined GFF for parsed assemblies.
-- `defaultBaselines.txt`: baseline per neighborhood (`hood_id`, `seqid`, `start`, `end`, `align_gene`).
-- `defaultProteinMetadata.txt`: protein metadata (clusters, product, merged annotations).
-- `defaultTreeMetadata.txt`: per-leaf tree metadata.
-- `defaultNewick.txt`: Newick-formatted tree string.
-- `defaultNucleotideLinks.txt`: nucleotide links; placeholder if not produced.
-- `defaultProteinLinks.txt`: protein links; placeholder if not produced.
+Visualization files are written under `results/hoodini-viz/` with this structure:
+
+- Root:
+  - `tree.nwk` — Newick-formatted tree string.
+  - `hoodini-viz.html` — standalone viewer (embeds base64-compressed parquet data).
+- `tsv/` (tabular text):
+  - `gff.gff` — combined GFF for parsed assemblies.
+  - `hoods.txt` — hoods per neighborhood (`hood_id`, `seqid`, `start`, `end`, `align_gene`).
+  - `protein_metadata.txt` — protein metadata (clusters, product, merged annotations).
+  - `tree_metadata.txt` — per-leaf tree metadata.
+  - `nucleotide_links.txt` — nucleotide links; placeholder if not produced.
+  - `protein_links.txt` — protein links; placeholder if not produced.
+- `parquet/` (columnar):
+  - `gff.parquet`, `hoods.parquet`, `protein_metadata.parquet`, `tree_metadata.parquet`, `nucleotide_links.parquet`, `protein_links.parquet`, and optional `domains.parquet`, `domains_metadata.parquet` when domains are requested.
 
 ## Dependencies & Environment
 - Conda/Mamba: see [environment.yml](../environment.yml). Includes `bioconda` tools (PADLOC, GenoMAD, MAFFT, Foldseek, FastANI, VeryFastTree, Infernal, FAMSA, DIAMOND, Skani) and pip packages (pyhmmer, diamondonpy, aria2p, jinja2, etc.).

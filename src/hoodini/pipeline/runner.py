@@ -17,8 +17,88 @@ log = logging.getLogger(__name__)
 
 
 def run_pipeline(config: RuntimeConfig) -> None:
-    """Execute the hoodini workflow using the provided config."""
+    """Execute the hoodini workflow using the provided config.
+
+    Pipeline Stages and File I/O:
+    ==============================
+
+    1. INITIALIZATION (initialize_inputs)
+        Expects: config.input_path OR config.inputsheet
+        Generates:
+        - {output}/ (creates output directory)
+        Returns: records DataFrame
+
+    2. IPG PARSING (run_ipg)
+        Expects: records DataFrame
+        Generates: (no files, enriches records with IPG data)
+        Returns: enriched records DataFrame
+
+    3. ASSEMBLY PARSING (run_assembly_parser)
+        Expects: records DataFrame, assembly_summary.parquet (packaged data)
+        Generates:
+        - {output}/assembly_list.txt
+        - {output}/assembly_folder/{GCA_*}/*.fna, *.gff
+        - {output}/all_neigh.tsv
+        - {output}/neighborhood/neighborhoods.fasta
+        - {output}/temp.gff
+        Returns: all_gff, all_prots, all_neigh DataFrames + valid_uids
+
+    4. PROTEIN COMPARISONS (run_protein_links) [if aai_tree or prot_links]
+        Expects: all_prots DataFrame
+        Generates:
+        - {output}/pairwise_aa.tsv
+        Returns: pairwise_aa DataFrame
+
+    5. NUCLEOTIDE COMPARISONS (run_pairwise_nt) [if ani_tree or nt_links]
+        Expects: all_neigh, all_gff DataFrames
+        Generates:
+        - {output}/ani_matrix.tsv (if ani_mode)
+        - {output}/nt_links.tsv (if nt_links)
+        Returns: pairwise_ani, nt_links DataFrames
+
+    6. PROTEIN CLUSTERING (cluster_proteins)
+        Expects: all_prots DataFrame
+        Generates:
+        - {output}/target_prots.fasta
+        - {output}/target_prots.aln (if clust_method != 'none')
+        Returns: all_prots with fam_cluster column
+
+    7. PROTEOME SIMILARITY (run_proteome_similarity) [if aai_tree]
+        Expects: all_prots, pairwise_aa, all_neigh, all_gff
+        Generates:
+        - {output}/aai_matrix.tsv
+        Returns: pairwise_aai DataFrame
+
+    8. TAXONOMY & TREE (parse_taxonomy_and_build_tree)
+        Expects: records, all_gff, all_neigh, all_prots DataFrames
+        Generates:
+        - {output}/tree.nwk
+        - {output}/records.csv
+        Returns: tree_str, den_data DataFrame
+
+    9. EXTRA ANNOTATIONS (optional tools)
+        - domains (run_domain): {output}/domains.tsv
+        - blast (run_blast): enriches all_gff
+        - padloc (run_padloc): enriches all_prots
+        - emapper (run_emapper): enriches all_prots
+        - deffinder (run_defensefinder): enriches all_prots
+        - cctyper (run_cctyper): {output}/cctyper/, enriches all_prots + all_gff
+        - ncrna (run_ncrna): {output}/ncrna/results.txt, results.sto, enriches all_gff
+        - genomad (run_genomad): {output}/genomad/, enriches all_gff
+
+    10. VIZ OUTPUTS (write_viz_outputs)
+        Expects: all_gff, all_neigh, all_prots, den_data, tree_str, optional extras
+        Generates:
+            - {output}/hoodini-viz/parquet/*.parquet (gff, hoods, protein_metadata,
+            tree_metadata, nucleotide_links, protein_links, domains, domains_metadata,
+            ncrna_metadata)
+            - {output}/hoodini-viz/tsv/*.txt (corresponding TSV files)
+            - {output}/hoodini-viz/tree.nwk
+            - {output}/hoodini-viz/hoodini-viz.html (standalone viewer with embedded data)
+    """
+    
     stage_header("Initializing Hoodini", "🚀")
+    
     from hoodini.pipeline.initialize import initialize_inputs
     records = initialize_inputs(
         input_path=config.input_path,
@@ -178,9 +258,10 @@ def run_pipeline(config: RuntimeConfig) -> None:
         pairwise_aai=pairwise_aai,
     )
 
-    stage_header("Running extra annotation tools", "🦠")
 
     domains_data = None
+    ncrna_data = None
+    
     if config.domains:
         from hoodini.extra_tools.domain import run_domain
 
@@ -240,10 +321,26 @@ def run_pipeline(config: RuntimeConfig) -> None:
             all_prots = all_prots.join(deffinder_df, on="id", how="left")
 
     if config.cctyper:
-        # TODO: re-enable CCTyper once dependencies and invocation are updated; currently disabled.
-        from hoodini.utils.logging_utils import warn
+        from hoodini.extra_tools.cctyper import run_cctyper
 
-        warn("Skipping CCTyper: tool integration is currently outdated and under maintenance.")
+        cctyper_df, crispr_df = run_cctyper(all_gff, all_prots, all_neigh, config.output, config.num_threads, valid_uids)
+        if cctyper_df.height > 0:
+            all_prots = all_prots.join(cctyper_df, on="id", how="left")
+        if crispr_df.height > 0:
+            gff_df = crispr_df.select(
+                [
+                    pl.col("seqid"),
+                    pl.lit("hoodini").alias("source"),
+                    pl.lit("region").alias("type"),
+                    pl.col("start"),
+                    pl.col("end"),
+                    pl.lit(".").alias("score"),
+                    pl.lit(".").alias("strand"),
+                    pl.lit(".").alias("phase"),
+                    (pl.lit("ID=") + pl.col("nc_feature") + pl.lit(";")).alias("attributes"),
+                ]
+            )
+            all_gff = pl.concat([all_gff, gff_df], how="vertical")
 
     if config.ncrna:
         from hoodini.extra_tools.ncrna import run_ncrna
@@ -285,6 +382,8 @@ def run_pipeline(config: RuntimeConfig) -> None:
             )
             all_gff = pl.concat([all_gff, gff_df], how="vertical")
 
+
+
     stage_done("Extra annotation complete")
 
     from hoodini.pipeline.write_data import write_viz_outputs
@@ -300,4 +399,5 @@ def run_pipeline(config: RuntimeConfig) -> None:
         pairwise_aa=pairwise_aa,
         domains_data=domains_data,
         write_domains=bool(config.domains),
+        ncrna_data=ncrna_data,
     )

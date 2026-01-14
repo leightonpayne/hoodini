@@ -3,6 +3,9 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable, Optional
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='UniProtMapper')
+warnings.filterwarnings('ignore', category=UserWarning, module='numpy.core.getlimits')
 
 from UniProtMapper import ProtMapper
 from alphafetcher import AlphaFetcher
@@ -16,7 +19,6 @@ from hoodini.utils.logging_utils import console, success
 from hoodini.utils.seq_io import read_fasta, to_fasta
 
 
-sys.setrecursionlimit(3000000)
 
 
 def parse_taxonomy_and_build_tree(
@@ -36,6 +38,42 @@ def parse_taxonomy_and_build_tree(
     aai_subset_mode: Optional[str] = None,
     nj_algorithm: Optional[str] = None,
 ):
+    """
+    Parse taxonomic information and build phylogenetic tree.
+
+    Expected Files:
+    ---------------
+    - records: DataFrame with taxid, organism, unique_id
+    - all_prots: DataFrame with protein sequences and fam_cluster
+    - all_neigh: DataFrame with neighborhood metadata
+    - tree_file: Optional user-provided Newick tree file
+    - {output}/target_prots.aln (if tree_mode == 'target_tree')
+    - {output}/aai_matrix.tsv (if tree_mode == 'aai_tree')
+    - {output}/ani_matrix.tsv (if tree_mode == 'ani_tree')
+
+    Generated Files:
+    ----------------
+    - {output}/tree.nwk: Newick format phylogenetic tree
+    - {output}/records.csv: Final records with taxonomy and metadata
+
+    Process:
+    --------
+    1. Enriches records with NCBI taxonomy (superkingdom, phylum, class, order, family, genus, species)
+    2. Builds phylogenetic tree based on tree_mode:
+            - 'target_tree': Uses target protein alignment
+            - 'aai_tree': Uses average amino acid identity matrix
+            - 'ani_tree': Uses average nucleotide identity matrix
+            - 'user': Uses provided tree_file
+            - 'taxonomy': Uses NCBI taxonomy hierarchy
+    3. Creates dendrogram metadata (den_data) for visualization
+
+    Returns:
+    --------
+    tuple: (tree_str: str, den_data: pl.DataFrame)
+        - tree_str: Newick format tree string
+        - den_data: DataFrame with leaf_id, taxonomy columns, and neighborhood coordinates
+    """
+    
     os.makedirs(output_dir, exist_ok=True)
 
     uid_map = {}
@@ -173,9 +211,9 @@ def parse_taxonomy_and_build_tree(
     elif tree_mode == "foldmason_tree":
         tree_str = _make_foldmason_tree(records, all_prots, output_dir, num_threads)
     elif tree_mode == "neigh_similarity_tree":
-        tree_str = _make_neigh_similarity_tree(all_prots)
+        tree_str = _make_neigh_similarity_tree(all_prots, all_neigh)
     elif tree_mode == "neigh_phylo_tree":
-        tree_str = _make_neigh_phylo_tree(records, all_prots)
+        tree_str = _make_neigh_phylo_tree(records, all_prots, all_neigh, all_gff)
     else:
         raise ValueError(f"Unsupported tree mode: {tree_mode}")
 
@@ -319,7 +357,6 @@ def _make_taxonomic_tree(records):
     taxids = valid.select("taxid").drop_nulls().unique().to_series().to_list()
     distances = calculate_taxid_distances(taxids, update_db=False)
     uids = valid["unique_id"].to_list()
-    print(valid)
     n = len(uids)
     mat = np.zeros((n, n), dtype=float)
     for a in range(n):
@@ -339,7 +376,7 @@ def _make_taxonomic_tree(records):
     return _linkage_to_newick(linkage, uids)
 
 
-def _make_neigh_similarity_tree(all_prot):
+def _make_neigh_similarity_tree(all_prot, all_neigh=None):
     pa = all_prot.filter(pl.col("id") != pl.col("target_prot"))
     counts = (
         pa.group_by(["target_prot", "fam_cluster"])
@@ -352,11 +389,49 @@ def _make_neigh_similarity_tree(all_prot):
     binmat = mat.drop("target_prot")
     dist = pdist(binmat.to_numpy(), metric="jaccard")
     linkage = hierarchy.linkage(dist, method="single")
-    return _linkage_to_newick(linkage, mat["target_prot"].to_list())
+    
+    # Map target_prot to unique_id if all_neigh is available
+    labels = mat["target_prot"].to_list()
+    if all_neigh is not None and "target_prot" in all_prot.columns and "unique_id" in all_prot.columns:
+        prot_to_uid = dict(all_prot.select(["target_prot", "unique_id"]).unique().iter_rows())
+        labels = [prot_to_uid.get(tp, tp) for tp in labels]
+    
+    return _linkage_to_newick(linkage, labels)
 
 
-def _make_neigh_phylo_tree(records, all_prot):
-    pa = all_prot.filter(pl.col("id") != pl.col("target_prot")).with_columns(
+def _make_neigh_phylo_tree(records, all_prot, all_neigh=None, all_gff=None):
+    # Need to join with all_gff to get positions and calculate relative positions
+    if all_gff is None or all_gff.height == 0:
+        # Fallback to simple similarity tree if we don't have position info
+        return _make_neigh_similarity_tree(all_prot, all_neigh)
+    
+    # Join all_prot with all_gff to get start/end positions
+    # Assuming all_gff has 'id' that matches all_prot 'id', and 'start'/'end' columns
+    if "id" not in all_gff.columns or "start" not in all_gff.columns or "end" not in all_gff.columns:
+        return _make_neigh_similarity_tree(all_prot, all_neigh)
+    
+    gff_pos = all_gff.select(["id", "start", "end", "unique_id"]).unique()
+    prot_with_pos = all_prot.join(gff_pos, on="id", how="left", suffix="_gff")
+    
+    # Calculate target positions for each unique_id
+    target_positions = (
+        prot_with_pos.filter(pl.col("id") == pl.col("target_prot"))
+        .select(["unique_id", "start", "end"])
+        .rename({"start": "target_start", "end": "target_end"})
+        .unique()
+    )
+    
+    # Join to get target positions and calculate relative positions
+    prot_with_pos = prot_with_pos.join(
+        target_positions,
+        on="unique_id",
+        how="left"
+    ).with_columns([
+        (pl.col("start") - pl.col("target_start")).alias("rel_start"),
+        (pl.col("end") - pl.col("target_end")).alias("rel_end")
+    ])
+    
+    pa = prot_with_pos.filter(pl.col("id") != pl.col("target_prot")).with_columns(
         ((pl.col("rel_start") + pl.col("rel_end")) / 2).alias("rel_pos")
     )
     weights = pa.with_columns((1.0 / (1 + (pl.col("rel_pos")).abs())).alias("w"))
@@ -380,7 +455,14 @@ def _make_neigh_phylo_tree(records, all_prot):
     norm_vals = mat.select(feature_cols).to_numpy()
     dist = pdist(norm_vals, metric="cosine")
     linkage = hierarchy.linkage(dist, method="single")
-    return _linkage_to_newick(linkage, mat["target_prot"].to_list())
+    
+    # Map target_prot to unique_id if all_neigh is available
+    labels = mat["target_prot"].to_list()
+    if all_neigh is not None and "target_prot" in all_prot.columns and "unique_id" in all_prot.columns:
+        prot_to_uid = dict(all_prot.select(["target_prot", "unique_id"]).unique().iter_rows())
+        labels = [prot_to_uid.get(tp, tp) for tp in labels]
+    
+    return _linkage_to_newick(linkage, labels)
 
 
 def _pairwise_to_matrix(
@@ -577,7 +659,6 @@ def _make_foldmason_tree(records, all_prot, output_dir, threads):
     import pandas as pd
 
     mapper = ProtMapper()
-    print(targets)
     mapped_pd, no_map = mapper.get(
         ids=targets, from_db="EMBL-GenBank-DDBJ_CDS", to_db="UniProtKB"
     )
@@ -590,8 +671,8 @@ def _make_foldmason_tree(records, all_prot, output_dir, threads):
         console.print(
             "[yellow]Foldmason tree requires AlphaFold structures, which need UniProt IDs.[/yellow]"
         )
-        console.print("[yellow]Falling back to standard MAFFT alignment tree.[/yellow]")
-        return _make_tree(all_prot, records, output_dir, threads)
+        console.print("[yellow]Falling back to standard alignment tree (FAMSA + VeryFastTree).[/yellow]")
+        return _make_tree(records, all_prot, output_dir, threads)
 
     mapped_pd = mapped_pd if mapped_pd is not None else pd.DataFrame()
     mapped_pl = pl.from_pandas(mapped_pd) if mapped_pd is not None and not mapped_pd.empty else pl.DataFrame()
@@ -661,16 +742,41 @@ def _make_foldmason_tree(records, all_prot, output_dir, threads):
 
 
 def _linkage_to_newick(linkage, labels):
+    """Convert scipy linkage to Newick format string using iterative approach.
+    
+    Avoids recursion depth limits by using explicit stack.
+    Includes branch lengths from the linkage matrix.
+    """
     tree = hierarchy.to_tree(linkage)
-
-    def build_newick(node):
+    
+    # Iterative post-order traversal
+    stack = [(tree, False)]
+    result_stack = []
+    
+    while stack:
+        node, visited = stack.pop()
         if node.is_leaf():
-            return labels[node.id]
-        left = build_newick(node.left)
-        right = build_newick(node.right)
-        return f"({left},{right})"
-
-    return build_newick(tree) + ";"
+            # Leaf nodes: just label (branch length added by parent)
+            result_stack.append((str(labels[node.id]), 0.0))
+        elif visited:
+            # Post-order: both children have been processed
+            right_str, right_dist = result_stack.pop()
+            left_str, left_dist = result_stack.pop()
+            
+            # Calculate branch lengths from this node to children
+            left_branch = node.dist - left_dist if left_dist < node.dist else 0.0
+            right_branch = node.dist - right_dist if right_dist < node.dist else 0.0
+            
+            # Format with branch lengths
+            subtree = f"({left_str}:{left_branch:.6f},{right_str}:{right_branch:.6f})"
+            result_stack.append((subtree, node.dist))
+        else:
+            # Pre-order: mark for post-processing and push children
+            stack.append((node, True))
+            stack.append((node.right, False))
+            stack.append((node.left, False))
+    
+    return result_stack[0][0] + ";"
 
 
 def calculate_taxid_distances(taxids, update_db=False):

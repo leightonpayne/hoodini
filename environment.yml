@@ -37,6 +37,7 @@ dependencies:
   - aria2
   - pigz
   - blast
+  - cctyper
   - pip:
       - pyhmmer
       - diamondonpy

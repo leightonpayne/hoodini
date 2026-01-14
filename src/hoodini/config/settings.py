@@ -51,8 +51,6 @@ class RuntimeConfig:
     clust_method: Optional[str] = None
     mod: Optional[str] = None
     wn: Optional[int] = None
-    height_factor: Optional[int] = None
-    ngenes: Optional[int] = None
     minwin: Optional[int] = None
     minwin_type: Optional[str] = None
 

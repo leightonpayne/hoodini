@@ -38,7 +38,7 @@ def validate_input_file(ctx, param, value):
                 special_char_pattern = re.compile(r"[^A-Za-z0-9\s._]+")
                 for i, line in enumerate(lines):
                     match = special_char_pattern.search(line)
-                    if match and not line.startswith("IMG"):
+                    if match:
                         raise click.BadParameter(
                             f"Invalid character '{match.group()}' found in line {i+1}: \"{line}\""
                         )
@@ -178,7 +178,6 @@ def read_input_sheet(filename):
         "protein_id",
         "nucleotide_id",
         "uniprot_id",
-        "img",
         "gff_path",
         "faa_path",
         "fna_path",
@@ -233,23 +232,13 @@ def read_input_list(filename):
         elif category["type"] == "uniprot":
             record["uniprot_id"] = category["id"]
             record["input_type"] = "protein"
-        elif category["type"] == "img":
-            record["img"] = True
-            if "|" in category["id"]:
-                record["protein_id"] = category["id"]
-                record["input_type"] = "protein"
-            else:
-                record["nucleotide_id"] = category["id"]
-                record["input_type"] = "nucleotide"
         elif category["type"] == "unmatched":
             record["failed"] = True
             record["failed_reason"] = "not valid ID"
         else:
             if ":" in id_:
                 category = categorize_id(id_.split(":")[0])
-                if category["type"] == "nucleotide" or (
-                    category["type"] == "img" and "|" in category["id"]
-                ):
+                if category["type"] == "nucleotide":
                     if (
                         "-" in id_.split(":")[1]
                         and id_.split(":")[1].split("-")[0].isdigit()

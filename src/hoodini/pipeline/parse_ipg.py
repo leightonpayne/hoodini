@@ -26,7 +26,30 @@ def safe_collect(lf: pl.LazyFrame) -> PlDF:
 
 
 def run_ipg(records_df: PlDF, *, cand_mode: str) -> PlDF:
-    """Polars-based IPG enrichment pipeline."""
+    """Polars-based IPG enrichment pipeline.
+    
+    Expected Files:
+    ---------------
+    - records_df: DataFrame from initialize_inputs with protein IDs
+    - Remote APIs: NCBI IPG web service, assembly reports (FTP)
+    
+    Generated Files:
+    ----------------
+    - None (all data kept in memory/DataFrame)
+    
+    Process:
+    --------
+    1. Fetches IPG (Identical Protein Groups) records from NCBI for input protein IDs
+    2. Maps proteins to nucleotide IDs and assembly accessions
+    3. Applies candidate selection mode ('all', 'best', or 'model')
+    4. Enriches records with assembly metadata (taxid, organism, strain)
+    5. Computes assembly lengths and filters candidates
+    
+    Returns:
+    --------
+    pl.DataFrame: Enriched records with columns: og_index, protein_id, nucleotide_id, 
+                  assembly, taxid, organism, strain, unique_id, etc.
+    """
     df = records_df.clone()
 
     def _as_scalar_str(val):

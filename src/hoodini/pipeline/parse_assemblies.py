@@ -73,7 +73,7 @@ def _enrich_proteins_with_metadata(
     return all_prots
 
 
-def run_assembly_parser(
+def     run_assembly_parser(
     records_df: pl.DataFrame,
     *,
     output_dir: Path | str | None = None,
@@ -92,21 +92,45 @@ def run_assembly_parser(
     minwin_type: str = "both",
 ) -> dict:
     """
-    Take an existing `records_df` (pandas.DataFrame) and:
-      1) Download assemblies (or use a local assembly folder) for all valid assembly_ids.
-      2) Populate `gbf_path`, `gff_path`, `faa_path`, `fna_path` for each record.
-      3) Run `extract_neighborhood(...)` in parallel for each valid record.
-      4) Concatenate results into `all_gff` and `all_neigh` DataFrames.
-      5) Enforce a minimum window size (`minwin`) and mark any short contigs as failed.
-      6) Write out intermediate files:
-           - `{output}/assembly_list.txt`
-           - `{output}/records.csv`
-           - `{output}/neighborhood/neighborhoods.fasta`
-           - `{output}/results.fasta`
-    Returns a dict with keys:
-      - "records":  updated DataFrame
-      - "all_gff":   DataFrame of extracted GFF sequences (id, sequence)
-      - "all_neigh": DataFrame of neighborhood sequences (seqid, sequence, etc.)
+    Download assemblies and extract genomic neighborhoods around target proteins.
+
+    Expected Files:
+    ---------------
+    - records_df: DataFrame from run_ipg with assembly accessions
+    - assembly_folder: Optional pre-downloaded assemblies directory structure:
+            {assembly_folder}/{GCA_XXXXXXXXX.X}/*.fna (genomic sequence)
+            {assembly_folder}/{GCA_XXXXXXXXX.X}/*.gff (annotations)
+            {assembly_folder}/{GCA_XXXXXXXXX.X}/*.faa (protein sequences)
+    - Remote: NCBI FTP servers for assembly downloads if not in assembly_folder
+
+    Generated Files:
+    ----------------
+    - {output}/assembly_list.txt: List of all assembly accessions to download
+    - {output}/assembly_folder/{GCA_*}/*.fna: Downloaded genomic FASTA files
+    - {output}/assembly_folder/{GCA_*}/*.gff: Downloaded GFF annotation files
+    - {output}/assembly_folder/{GCA_*}/*.faa: Downloaded protein FASTA files
+    - {output}/all_neigh.tsv: All extracted neighborhoods metadata
+    - {output}/neighborhood/neighborhoods.fasta: Extracted neighborhood sequences
+    - {output}/temp.gff: Temporary GFF of all extracted regions
+    - {output}/results.fasta: All extracted protein sequences
+
+    Process:
+    --------
+    1. Downloads assemblies (or uses local assembly_folder) for all valid assembly IDs
+    2. Populates file paths (gbf_path, gff_path, faa_path, fna_path) for each record
+    3. Runs extract_neighborhood() in parallel for each valid record
+    4. Concatenates results into all_gff and all_neigh DataFrames
+    5. Enforces minimum window size (minwin) and marks short contigs as failed
+    6. Writes intermediate files for downstream stages
+
+    Returns:
+    --------
+    dict with keys:
+        - "records": updated DataFrame with file paths and extraction status
+        - "all_gff": DataFrame of extracted GFF features (id, seqid, start, end, strand, etc.)
+        - "all_prots": DataFrame of extracted protein sequences (id, sequence, product, etc.)
+        - "all_neigh": DataFrame of neighborhood metadata (seqid, start_win, end_win, etc.)
+        - "valid_uids": list of unique_id values for successfully extracted neighborhoods
     """
     records = to_polars(records_df, schema=RECORDS)
 

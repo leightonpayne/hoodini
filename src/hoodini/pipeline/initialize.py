@@ -25,14 +25,33 @@ def initialize_inputs(
     remote_max_targets: int = 100,
 ) -> pl.DataFrame:
     """
-    Initialize the working directory and read the user’s input records (Polars).
+    Initialize the working directory and read the user's input records (Polars).
 
+    Expected Files:
+    ---------------
+    - input_path: single-column text file with protein IDs (NCBI/UniProt), one per line
+        OR
+    - inputsheet: TSV file with columns: og_index, seqid, accession, organism, etc.
+    - hoodini/data/assembly_summary.parquet (packaged with hoodini, auto-checked)
+
+    Generated Files:
+    ----------------
+    - {output}/ directory (created or overwritten if force=True)
+    - No immediate output files; returns DataFrame for downstream stages
+
+    Process:
+    --------
     1. Creates or (if existing) optionally overwrites the output folder.
-    2. Reads either a single‐column input list or a TSV “inputsheet”.
-    3. Converts UniProt IDs to NCBI IDs via `uniprot2ncbi(...)`.
-    4. Drops duplicate records based on “og_index”.
+    2. Reads either a single‐column input list or a TSV "inputsheet".
+    3. Converts UniProt IDs to NCBI IDs via `uniprot2ncbi(...)` with remote BLAST if needed.
+    4. Drops duplicate records based on "og_index".
     5. Returns a Polars DataFrame of final, deduplicated records.
+
+    Returns:
+    --------
+    pl.DataFrame with schema matching RECORDS (og_index, seqid, accession, organism, etc.)
     """
+
     check_assembly_db()
 
     if output:

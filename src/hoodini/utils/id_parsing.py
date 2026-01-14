@@ -31,7 +31,6 @@ def categorize_id(id_: str) -> Dict[str, str | None]:
         r"[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]"
         r"(?:[A-Z][A-Z0-9]{2}[0-9])?)$"
     )
-    img_pattern = re.compile(r"^(IMGVR|IMGPR)\S*$")
     nucleotide_patterns = [
         re.compile(
             r"^("
@@ -67,8 +66,6 @@ def categorize_id(id_: str) -> Dict[str, str | None]:
 
     if re.match(uniprot_pattern, id_part):
         return {"type": "uniprot", "id": id_part, "protein_id": None}
-    if re.match(img_pattern, id_part):
-        return {"type": "img", "id": id_part, "protein_id": None}
     if any(re.match(pattern, id_part) for pattern in nucleotide_patterns):
         return {
             "type": "nucleotide",

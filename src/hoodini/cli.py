@@ -45,7 +45,7 @@ click.rich_click.OPTION_GROUPS = {
         },
         {
             "name": "Neighborhood Window",
-            "options": ["--win-mode", "--win", "--ngenes", "--min-win", "--min-win-type", "--height-factor"],
+            "options": ["--win-mode", "--win", "--min-win", "--min-win-type"],
         },
         {
             "name": "Clustering",
@@ -119,12 +119,17 @@ def cli():
 @click.option("--assembly-folder", "assembly_folder", help="Path to a local assembly folder.")
 @click.option("--prot-links", "prot_links", is_flag=True, help="Run pairwise protein comparisons.")
 @click.option("--nt-links", "nt_links", is_flag=True, help="Run pairwise nucleotide comparisons.")
-@click.option("--ani-mode", "ani_mode", help="Choose ANI calculation method.")
+@click.option(
+    "--ani-mode",
+    "ani_mode",
+    type=click.Choice(["skani", "blastn"]),
+    help="Choose ANI calculation method for ANI trees.",
+)
 @click.option(
     "--nt-aln-mode",
     "nt_aln_mode",
     type=click.Choice(["blastn", "fastani", "minimap2", "intergenic_blastn"]),
-    help="Nucleotide alignment mode to use for pairwise comparisons: 'blastn' or 'fastani'.",
+    help="Nucleotide alignment mode for pairwise comparisons.",
 )
 @click.option("--blast", help="BLAST query file to use.")
 @click.option(
@@ -146,8 +151,6 @@ def cli():
     help="Window mode: 'win_nts' or 'win_genes'.",
 )
 @click.option("--win", "wn", type=int, help="Window size (genes or nucleotides).")
-@click.option("--height-factor", "height_factor", type=int, help="Height factor for plotting.")
-@click.option("--ngenes", type=int, help="Number of genes in context window.")
 @click.option("--min-win", "minwin", type=int, help="Min window size on each side.")
 @click.option(
     "--min-win-type",
@@ -177,8 +180,8 @@ def cli():
 @click.option(
     "--aai-mode",
     "aai_mode",
-    type=click.Choice(["wgrr", "aai", "hyper", "all"]),
-    help="Mode for AAI/proteome similarity calculation.",
+    type=click.Choice(["wgrr", "aai"]),
+    help="Mode for AAI tree construction (wgrr or aai). Note: 'hyper' mode is not supported for AAI trees.",
 )
 @click.option(
     "--aai-subset-mode",
