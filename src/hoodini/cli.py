@@ -3,12 +3,11 @@ import logging
 import os
 import sys
 import warnings
-from typing import Optional
 
-from click.core import ParameterSource
-from rich.logging import RichHandler
 import rich_click as click
 import tomli
+from click.core import ParameterSource
+from rich.logging import RichHandler
 
 from hoodini.config import build_runtime_config, load_default_config
 from hoodini.pipeline.runner import run_pipeline
@@ -231,7 +230,7 @@ def cli():
 @click.option("--quiet", is_flag=True, help="Silence all non-error output.")
 @click.option("--debug", is_flag=True, help="Enable verbose debug logging.")
 @click.pass_context
-def run(ctx, config_file: Optional[str], quiet: bool, debug: bool, **cli_kwargs) -> None:
+def run(ctx, config_file: str | None, quiet: bool, debug: bool, **cli_kwargs) -> None:
     """
     Run hoodini with default parameters or from a config file.
     """
@@ -439,7 +438,7 @@ def prefetch_links(input_file, output_file, kinds):
     """Generate prefetched links (assembly_id, file_type, link) for a list of assemblies."""
     from hoodini.pipeline.helpers.prefetch_links import get_prefetched_link_table
 
-    with open(input_file, "r") as fh:
+    with open(input_file) as fh:
         accs = [l.strip() for l in fh if l.strip()]
 
     kinds_list = [k.strip() for k in kinds.split(",") if k.strip()]

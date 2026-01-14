@@ -1,14 +1,16 @@
-from hoodini.utils.classes import IPGXMLFile
-import time
-from pathlib import Path
-import requests
-import itertools
-import polars as pl
-import taxoniq
 import concurrent.futures
+import itertools
+import time
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
-from hoodini.utils.logging_utils import info, warn, error
+from pathlib import Path
+
+import polars as pl
+import requests
+import taxoniq
+
+from hoodini.utils.classes import IPGXMLFile
+from hoodini.utils.logging_utils import error, info, warn
 
 
 def nuc2ass(nucleotide_ids, apikey=None, temp_dir="temp", chunk_size=10, max_concurrent=9):

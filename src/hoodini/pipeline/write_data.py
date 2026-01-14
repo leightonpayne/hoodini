@@ -1,21 +1,20 @@
-from pathlib import Path
-from typing import Optional
-import json
-
-import polars as pl
 import base64
 import gzip
 from importlib.resources import files
+from pathlib import Path
+
+import polars as pl
 from jinja2 import Environment
+
 from hoodini.utils.polars_adapters import to_polars
 
 
 def _append_extra_tool_gffs(
     all_gff: pl.DataFrame,
-    blast_data: Optional[pl.DataFrame] = None,
-    crispr_df: Optional[pl.DataFrame] = None,
-    ncrna_data: Optional[pl.DataFrame] = None,
-    genomad_df: Optional[pl.DataFrame] = None,
+    blast_data: pl.DataFrame | None = None,
+    crispr_df: pl.DataFrame | None = None,
+    ncrna_data: pl.DataFrame | None = None,
+    genomad_df: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """
     Internal helper to transform and concatenate extra tool outputs to GFF format.
@@ -105,16 +104,16 @@ def write_viz_outputs(
     all_prots: pl.DataFrame,
     den_data: pl.DataFrame,
     tree_str: str,
-    records: Optional[pl.DataFrame] = None,
-    nt_links: Optional[pl.DataFrame] = None,
-    pairwise_aa: Optional[pl.DataFrame] = None,
-    domains_data: Optional[pl.DataFrame] = None,
-    ncrna_data: Optional[pl.DataFrame] = None,
+    records: pl.DataFrame | None = None,
+    nt_links: pl.DataFrame | None = None,
+    pairwise_aa: pl.DataFrame | None = None,
+    domains_data: pl.DataFrame | None = None,
+    ncrna_data: pl.DataFrame | None = None,
     write_domains: bool = False,
     # Raw extra tool outputs (for GFF transformation)
-    blast_data: Optional[pl.DataFrame] = None,
-    crispr_df: Optional[pl.DataFrame] = None,
-    genomad_df: Optional[pl.DataFrame] = None,
+    blast_data: pl.DataFrame | None = None,
+    crispr_df: pl.DataFrame | None = None,
+    genomad_df: pl.DataFrame | None = None,
 ) -> Path:
     """
     Write hoodini visualization-ready files into a hoodini-viz folder.
@@ -302,7 +301,7 @@ def write_viz_outputs(
 
         for col in prots.columns:
             col_dtype = prots.schema.get(col)
-            if col_dtype == pl.Utf8 or col_dtype == pl.String:
+            if col_dtype in (pl.Utf8, pl.String):
                 prots = prots.with_columns(
                     pl.col(col)
                     .cast(pl.Utf8)
@@ -324,7 +323,7 @@ def write_viz_outputs(
     else:
         protein_headers = "\t".join(base_headers) + "\n"
         (tsv_dir / "protein_metadata.txt").write_text(protein_headers, encoding="utf-8")
-        pl.DataFrame(schema={c: pl.Utf8 for c in base_headers}).write_parquet(
+        pl.DataFrame(schema=dict.fromkeys(base_headers, pl.Utf8)).write_parquet(
             parquet_dir / "protein_metadata.parquet"
         )
 

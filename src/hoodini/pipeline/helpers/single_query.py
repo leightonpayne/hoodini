@@ -5,20 +5,17 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
 
-import polars as pl
 import requests
 
 try:
-    from Bio.Blast import NCBIWWW
     from Bio import SearchIO
+    from Bio.Blast import NCBIWWW
 except Exception:  # biopython optional; fallback handled below
     NCBIWWW = None
     SearchIO = None
 
 from hoodini.utils.logging_utils import error, info, warn
-
 
 UNIPROT_RE = re.compile(r"^[A-NR-Z][0-9][A-Z0-9]{3}[0-9](?:-[0-9]+)?$")
 
@@ -117,7 +114,7 @@ def prepare_single_query_input(
     evalue: float = 1e-5,
     max_targets: int = 100,
     db: str = "nr_cluster_seq",
-) -> Optional[Path]:
+) -> Path | None:
     """
     Given a query (protein ID or FASTA string), run remote BLAST and
     emit a single-column input list file with the hit IDs.

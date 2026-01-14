@@ -1,24 +1,22 @@
 import os
 import subprocess
-import sys
-from pathlib import Path
-from typing import Iterable, Optional
 import warnings
+from collections.abc import Iterable
+from pathlib import Path
+
 warnings.filterwarnings('ignore', category=UserWarning, module='UniProtMapper')
 warnings.filterwarnings('ignore', category=UserWarning, module='numpy.core.getlimits')
 
-from UniProtMapper import ProtMapper
-from alphafetcher import AlphaFetcher
-import numpy as np
-import polars as pl
-import taxoniq
-from scipy.cluster import hierarchy
-from scipy.spatial.distance import pdist, squareform
+import numpy as np  # noqa: E402
+import polars as pl  # noqa: E402
+import taxoniq  # noqa: E402
+from alphafetcher import AlphaFetcher  # noqa: E402
+from scipy.cluster import hierarchy  # noqa: E402
+from scipy.spatial.distance import pdist, squareform  # noqa: E402
+from UniProtMapper import ProtMapper  # noqa: E402
 
-from hoodini.utils.logging_utils import console, success
-from hoodini.utils.seq_io import read_fasta, to_fasta
-
-
+from hoodini.utils.logging_utils import console, success  # noqa: E402
+from hoodini.utils.seq_io import read_fasta, to_fasta  # noqa: E402
 
 
 def parse_taxonomy_and_build_tree(
@@ -33,10 +31,10 @@ def parse_taxonomy_and_build_tree(
     pairwise_aai=None,
     pairwise_ani=None,
     valid_uids=None,
-    aai_mode: Optional[str] = None,
-    ani_mode: Optional[str] = None,
-    aai_subset_mode: Optional[str] = None,
-    nj_algorithm: Optional[str] = None,
+    aai_mode: str | None = None,
+    ani_mode: str | None = None,
+    aai_subset_mode: str | None = None,
+    nj_algorithm: str | None = None,
 ):
     """
     Parse taxonomic information and build phylogenetic tree.
@@ -251,9 +249,9 @@ def _build_leaf_metadata(records: pl.DataFrame, all_neigh: pl.DataFrame) -> pl.D
         tax_rows.append(row)
 
     taxdf = (
-        pl.DataFrame(tax_rows, schema={"taxid": pl.Utf8, **{c: pl.Utf8 for c in taxcols}})
+        pl.DataFrame(tax_rows, schema={"taxid": pl.Utf8, **dict.fromkeys(taxcols, pl.Utf8)})
         if tax_rows
-        else pl.DataFrame([{"taxid": "32644", **{c: None for c in taxcols}}])
+        else pl.DataFrame([{"taxid": "32644", **dict.fromkeys(taxcols)}])
     )
 
     records = records.join(taxdf, on="taxid", how="left")
@@ -467,7 +465,7 @@ def _make_neigh_phylo_tree(records, all_prot, all_neigh=None, all_gff=None):
 
 def _pairwise_to_matrix(
     pairwise_df: pl.DataFrame,
-    ids: Optional[Iterable[str]] = None,
+    ids: Iterable[str] | None = None,
     qcol: str = "qseqid",
     scol: str = "sseqid",
     valcol: str = "pident",
@@ -533,14 +531,14 @@ def _pairwise_to_matrix(
 
 def aai_tree(
     pairwise_aai: pl.DataFrame,
-    valid_uids: Optional[Iterable[str]] = None,
+    valid_uids: Iterable[str] | None = None,
     qcol: str = "qseqid",
     scol: str = "sseqid",
     pcol: str = "pident",
     algorithm: str = "nj",
     threads: int = 1,
-    mode: Optional[str] = None,
-    subset_mode: Optional[str] = None,
+    mode: str | None = None,
+    subset_mode: str | None = None,
 ) -> str:
     """Build a tree from AAI pairwise table (pident) using DecentTree.
 
@@ -580,13 +578,13 @@ def aai_tree(
 
 def ani_tree(
     pairwise_ani: pl.DataFrame,
-    valid_uids: Optional[Iterable[str]] = None,
+    valid_uids: Iterable[str] | None = None,
     qcol: str = "A",
     scol: str = "B",
     pcol: str = "ANI",
     algorithm: str = "nj",
     threads: int = 1,
-    mode: Optional[str] = None,
+    mode: str | None = None,
 ) -> str:
     """Build a tree from ANI pairwise table using DecentTree.
 

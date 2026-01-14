@@ -1,4 +1,3 @@
-import os
 import subprocess
 from importlib.resources import files
 from pathlib import Path

@@ -1,14 +1,22 @@
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing as _mp
-from pathlib import Path
 import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 
 import polars as pl
 import requests
 import requests.adapters
-from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, SpinnerColumn, TaskProgressColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 try:
     from tqdm.notebook import tqdm as tqdm_notebook
@@ -18,7 +26,7 @@ except Exception:  # tqdm may be absent in some environments
 from hoodini.models.schemas import GFF, NEIGHBORHOODS, PROTEINS, RECORDS
 from hoodini.pipeline.helpers.neighborhood_extractor import extract_neighborhood
 from hoodini.pipeline.helpers.prefetch_links import get_prefetched_link_table
-from hoodini.utils.logging_utils import console, info, warn, success, error
+from hoodini.utils.logging_utils import error, info, success, warn
 from hoodini.utils.polars_adapters import to_polars
 
 
@@ -32,10 +40,7 @@ def in_jupyter():
         from IPython import get_ipython
 
         shell = get_ipython().__class__.__name__
-        if shell == "ZMQInteractiveShell":
-            return True  
-        else:
-            return False  
+        return shell == "ZMQInteractiveShell"  
     except Exception:
         return False
 
@@ -226,13 +231,13 @@ def     run_assembly_parser(
             pbar = tqdm(total=total_files, desc="Downloading assemblies")
         else:
             from rich.progress import (
-                Progress,
                 BarColumn,
+                Progress,
+                SpinnerColumn,
+                TaskProgressColumn,
                 TextColumn,
                 TimeElapsedColumn,
                 TimeRemainingColumn,
-                SpinnerColumn,
-                TaskProgressColumn,
             )
 
             progress = Progress(
@@ -413,7 +418,7 @@ def     run_assembly_parser(
                             failed_msgs.append(res[3])
                     except TimeoutError:
                         failed_ids.append(str(item))
-                        failed_msgs.append(f"TIMEOUT after 10 minutes")
+                        failed_msgs.append("TIMEOUT after 10 minutes")
                     except Exception as e:
                         failed_ids.append(str(item))
                         failed_msgs.append(f"Exception: {type(e).__name__}: {str(e)}")

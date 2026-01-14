@@ -1,11 +1,12 @@
+import re
 import subprocess
 from importlib.resources import files
 from pathlib import Path
-import re
 
 import polars as pl
 
 from hoodini.utils.logging_utils import info, warn
+
 
 def run_ncrna(all_neigh, den_data, output, num_threads, valid_unique_ids):
     info("🔬\tRunning Infernal for ncRNA annotation...")
@@ -54,7 +55,7 @@ def run_ncrna(all_neigh, den_data, output, num_threads, valid_unique_ids):
     if stockholm_file.stat().st_size > 0:
         # Parse tblout file manually (whitespace-separated, comments start with #)
         rows = []
-        with open(tblout_file, "r") as f:
+        with open(tblout_file) as f:
             for line in f:
                 if line.startswith("#") or not line.strip():
                     continue

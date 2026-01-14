@@ -1,10 +1,12 @@
 from __future__ import annotations
-from typing import Optional, Tuple, Union
-import math
-import concurrent.futures as _fut
 
-import polars as pl
+import concurrent.futures as _fut
+import math
+from pathlib import Path
+
 import numpy as np
+import polars as pl
+
 from hoodini.utils.logging_utils import console
 
 try:
@@ -112,7 +114,7 @@ def _normalize_proteins_df(prots: pl.DataFrame, require_fam: bool = False) -> pl
 
 
 def _annotate_hits(
-    hits: pl.DataFrame, prots: pl.DataFrame, pident_min: Optional[float], exclude_self: bool
+    hits: pl.DataFrame, prots: pl.DataFrame, pident_min: float | None, exclude_self: bool
 ) -> pl.DataFrame:
     """Join hits to seq IDs and apply filters in Polars."""
     qp = prots.rename({"prot_id": "qseqid", "target_nuc": "q_seq"})
@@ -148,7 +150,7 @@ def _compute_subset_protein_ids(
     all_neigh: pl.DataFrame,
     all_gff: pl.DataFrame,
     subset_mode: str,
-    win: Optional[int] = None,
+    win: int | None = None,
     win_mode: str = "bp",
 ) -> set:
     """Compute a set of protein ids to keep according to subset_mode.
@@ -170,7 +172,7 @@ def _compute_subset_protein_ids(
                 "'target_prot' column not found in all_prots for subset_mode='target_prot'"
             )
         vals = all_prots.select("target_prot").drop_nulls().unique().to_series().to_list()
-        return set([v for v in vals if v is not None])
+        return {v for v in vals if v is not None}
 
     if not {"seqid", "start_win", "end_win"}.issubset(set(all_neigh.columns)):
         raise ValueError(
@@ -246,7 +248,7 @@ def _compute_subset_protein_ids(
     if sel.is_empty():
         return set()
     vals = sel.select(prot_col).unique().to_series().to_list()
-    return set([v for v in vals if v is not None])
+    return {v for v in vals if v is not None}
 
 
 def _rbh_from_ann(ann: pl.DataFrame) -> pl.DataFrame:
@@ -315,7 +317,7 @@ def _rbh_from_ann(ann: pl.DataFrame) -> pl.DataFrame:
 def compute_wgrr(
     hits_df: pl.DataFrame | pl.LazyFrame,
     proteins_df: pl.DataFrame | pl.LazyFrame,
-    pident_min: Optional[float] = 30.0,
+    pident_min: float | None = 30.0,
     exclude_self: bool = True,
     symmetric: bool = True,
 ) -> pl.DataFrame:
@@ -373,7 +375,7 @@ def compute_wgrr(
 def compute_aai_rbh(
     hits_df: pl.DataFrame | pl.LazyFrame,
     proteins_df: pl.DataFrame | pl.LazyFrame,
-    pident_min: Optional[float] = 30.0,
+    pident_min: float | None = 30.0,
     exclude_self: bool = True,
 ) -> pl.DataFrame:
     """
@@ -556,19 +558,19 @@ def compute_vcontact2_hypergeom(
 
 
 def run_proteome_similarity(
-    all_prots: Union[pl.DataFrame, pl.DataFrame, pl.LazyFrame],
-    pairwise_aa: Union[pl.DataFrame, pl.DataFrame, pl.LazyFrame],
-    all_neigh: Optional[Union[pl.DataFrame, pl.DataFrame, pl.LazyFrame]] = None,
-    all_gff: Optional[Union[pl.DataFrame, pl.DataFrame, pl.LazyFrame]] = None,
-    outdir: Optional[str] = None,
+    all_prots: pl.DataFrame | pl.DataFrame | pl.LazyFrame,
+    pairwise_aa: pl.DataFrame | pl.DataFrame | pl.LazyFrame,
+    all_neigh: pl.DataFrame | pl.DataFrame | pl.LazyFrame | None = None,
+    all_gff: pl.DataFrame | pl.DataFrame | pl.LazyFrame | None = None,
+    outdir: str | None = None,
     pident_min: float = 30.0,
     mode: str = "all",
-    subset_mode: Optional[str] = None,
-    win: Optional[int] = None,
+    subset_mode: str | None = None,
+    win: int | None = None,
     win_mode: str = "bp",
     parallel: bool = False,
-    num_threads: Optional[int] = None,
-) -> Union[pl.DataFrame, Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]]:
+    num_threads: int | None = None,
+) -> pl.DataFrame | tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
     Compute wGRR, AAI (RBH), and/or vContact2-like hypergeometric scores.
 

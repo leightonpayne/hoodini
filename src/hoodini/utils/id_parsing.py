@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from typing import Dict
 
 
 def is_refseq_nuccore(nuc_id) -> bool:
@@ -22,7 +21,7 @@ def switch_assembly_prefix(asm_id):
     return asm_id
 
 
-def categorize_id(id_: str) -> Dict[str, str | None]:
+def categorize_id(id_: str) -> dict[str, str | None]:
     parts = id_.split(":")
     id_part = parts[0]
 

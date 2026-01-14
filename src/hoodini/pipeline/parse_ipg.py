@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """IPG (Identical Protein Groups) enrichment pipeline using Polars."""
 
-import os
 from importlib.resources import files
 from pathlib import Path
 
@@ -9,7 +8,7 @@ import polars as pl
 
 from hoodini.pipeline.helpers.fetch_ipg_from_accessions import fetch_ipg_from_accessions
 from hoodini.pipeline.helpers.nuc2asmlen import run_nuc2asmlen
-from hoodini.utils.logging_utils import console, debug, info, warn
+from hoodini.utils.logging_utils import info, warn
 from hoodini.utils.polars_adapters import to_polars
 
 PlDF = pl.DataFrame
@@ -233,9 +232,7 @@ def _fetch_ipg_data(df: PlDF, cand_mode: str) -> PlDF:
     def fix_asm(nuc_id: str | None, asm_id: str | None) -> str | None:
         if nuc_id is None or asm_id is None:
             return asm_id
-        if is_refseq_nuccore(nuc_id) and str(asm_id).startswith("GCA_"):
-            return switch_assembly_prefix(asm_id)
-        elif not is_refseq_nuccore(nuc_id) and str(asm_id).startswith("GCF_"):
+        if is_refseq_nuccore(nuc_id) and str(asm_id).startswith("GCA_") or not is_refseq_nuccore(nuc_id) and str(asm_id).startswith("GCF_"):
             return switch_assembly_prefix(asm_id)
         return asm_id
 

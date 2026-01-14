@@ -5,7 +5,8 @@ from shutil import copyfile
 
 import polars as pl
 
-from hoodini.utils.logging_utils import info, warn, success
+from hoodini.utils.logging_utils import info, success, warn
+
 
 def run_emapper(all_prots: pl.DataFrame, output: str | Path, num_threads: int = 1) -> pl.DataFrame:
     """

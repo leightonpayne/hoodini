@@ -1,20 +1,20 @@
 import collections
+from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
-from datetime import datetime
 
 import polars as pl
 import pyhmmer
 from pyhmmer import easel
 from pyhmmer.plan7 import HMMFile
 from rich.progress import (
+    BarColumn,
     Progress,
     SpinnerColumn,
-    BarColumn,
     TaskProgressColumn,
+    TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
-    TextColumn,
 )
 
 from hoodini.utils.logging_utils import info, warn
@@ -150,7 +150,7 @@ def run_domain(
 
     data_dir = files("hoodini").joinpath("data", "metacerberus")
     output = Path(output)
-    from hoodini.download.metacerberus import list_db_files, get_db_groups, check_downloaded
+    from hoodini.download.metacerberus import check_downloaded, get_db_groups, list_db_files
 
     try:
         files_list = list_db_files()

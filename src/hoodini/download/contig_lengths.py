@@ -1,24 +1,31 @@
 import asyncio
+import contextlib
+import json
 import os
-from pathlib import Path
-from importlib.resources import files
-from typing import Optional, List, Tuple, Dict, Any
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from importlib.resources import files
+from pathlib import Path
+from typing import Any
 
 import aiohttp  # type: ignore[import]
 import polars as pl  # type: ignore[import]
+import pyarrow as pa
 import pyarrow.parquet as pq  # type: ignore[import]
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
-import json
-import pyarrow as pa  
 import requests  # type: ignore[import]
+from rich.progress import (  # type: ignore[import]
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
+from hoodini.download.assembly_summary import download_assembly_summary_db
 from hoodini.pipeline.helpers.prefetch_links import get_prefetched_link_table
 from hoodini.utils.logging_utils import console
-from hoodini.download.assembly_summary import download_assembly_summary_db
 
-NCBI_API_KEY: Optional[str] = os.environ.get("NCBI_API_KEY")
+NCBI_API_KEY: str | None = os.environ.get("NCBI_API_KEY")
 
 DATA_DIR = files("hoodini").joinpath("data")
 CONTIG_LENGTHS_DIR = DATA_DIR.joinpath("contig_lengths")
@@ -29,7 +36,7 @@ DEFAULT_GROUPS = {"bacteria", "viral", "archaea", "metagenomes", "other"}
 MAX_RETRIES = 3
 REMOTE_CONTIG_LENGTHS_URL = "https://storage.hoodini.bio/contig_lengths.parquet"
 
-_ASM_CANDIDATES: Tuple[str, ...] = (
+_ASM_CANDIDATES: tuple[str, ...] = (
     "assembly_accession",
     "assemblyAccession",
     "assembly_id",
@@ -38,7 +45,7 @@ _ASM_CANDIDATES: Tuple[str, ...] = (
 )
 
 
-def _get_remote_parquet_last_modified() -> Optional[datetime]:
+def _get_remote_parquet_last_modified() -> datetime | None:
     """Get Last-Modified date from remote contig_lengths.parquet."""
     try:
         resp = requests.head(REMOTE_CONTIG_LENGTHS_URL, timeout=10)
@@ -53,7 +60,7 @@ def _get_remote_parquet_last_modified() -> Optional[datetime]:
     return None
 
 
-def _detect_assembly_col_in_file(path: Path) -> Optional[str]:
+def _detect_assembly_col_in_file(path: Path) -> str | None:
     try:
         pf = pq.ParquetFile(path)
         names = set(pf.schema.names)
@@ -65,7 +72,7 @@ def _detect_assembly_col_in_file(path: Path) -> Optional[str]:
     return None
 
 
-def _detect_assembly_col_in_dir(dirpath: Path, sample: int = 10) -> Optional[str]:
+def _detect_assembly_col_in_dir(dirpath: Path, sample: int = 10) -> str | None:
     try:
         files = sorted(dirpath.glob("part-*.parquet"))[:sample]
         for f in files:
@@ -79,8 +86,8 @@ def _detect_assembly_col_in_dir(dirpath: Path, sample: int = 10) -> Optional[str
 
 def get_missing_contigs_from_summary(
     assembly_summary_path: Path,
-    allowed_assemblies_df: Optional[pl.DataFrame] = None,
-) -> Tuple[pl.DataFrame, Optional[float]]:
+    allowed_assemblies_df: pl.DataFrame | None = None,
+) -> tuple[pl.DataFrame, float | None]:
     """Return a DataFrame of missing assembly_accession values and latest mtime.
     
     Uses lazy evaluation and anti-join with streaming to minimize memory usage.
@@ -106,17 +113,15 @@ def get_missing_contigs_from_summary(
             how="semi",
         )
     
-    latest_mtime: Optional[float] = None
+    latest_mtime: float | None = None
     
     # Build missing_lf lazily - scan ALL *.parquet files (compiled + new parts)
     all_parquet_files = list(CONTIG_LENGTHS_DIR.glob("*.parquet"))
     
     if all_parquet_files:
         console.log(f"Scanning {len(all_parquet_files)} parquet files in contig_lengths/...")
-        try:
+        with contextlib.suppress(Exception):
             latest_mtime = max(p.stat().st_mtime for p in all_parquet_files)
-        except Exception:
-            pass
         
         # Lazy scan for ALL existing contig assemblies
         contig_lf = (
@@ -170,24 +175,22 @@ class PartRotatingWriter:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.target_bytes = target_bytes
         self.rows_target = start_rows
-        self._buffer: List[Dict[str, Any]] = []
+        self._buffer: list[dict[str, Any]] = []
         self.part_idx = self._next_index()
         self.total_rows = 0
         self.total_files = 0
 
     def _next_index(self) -> int:
-        existing = [p for p in self.dir.glob("part-*.parquet")]
+        existing = list(self.dir.glob("part-*.parquet"))
         if not existing:
             return 0
         max_id = -1
         for p in existing:
-            try:
+            with contextlib.suppress(Exception):
                 max_id = max(max_id, int(p.stem.split("-")[1]))
-            except Exception:
-                pass
         return max_id + 1
 
-    def _write_once(self, rows: List[Dict[str, Any]]) -> int:
+    def _write_once(self, rows: list[dict[str, Any]]) -> int:
         table = pa.Table.from_pylist(rows)
         tmp = self.dir / f"part-{self.part_idx:05d}.parquet.tmp"
         pq.write_table(table, tmp, compression="zstd")
@@ -200,7 +203,7 @@ class PartRotatingWriter:
         self.part_idx += 1
         self.total_files += 1
 
-    def add_many(self, rows: List[Dict[str, Any]]):
+    def add_many(self, rows: list[dict[str, Any]]):
         if not rows:
             return
         self._buffer.extend(rows)
@@ -234,7 +237,7 @@ async def fetch_to_queue(session, asm, url, queue, batch_rows, retries, timeout_
         while True:
             attempt += 1
             try:
-                batch: List[Dict[str, Any]] = []
+                batch: list[dict[str, Any]] = []
                 async with session.get(url, timeout=timeout_s) as resp:
                     if resp.status != 200:
                         raise RuntimeError(f"HTTP {resp.status}")
@@ -335,7 +338,7 @@ async def stream_and_write(
 
 
 def download_contig_lengths(
-    api_key: Optional[str] = None, workers: int = 10, skip_assembly_summary: bool = False
+    api_key: str | None = None, workers: int = 10, skip_assembly_summary: bool = False
 ):
     global NCBI_API_KEY
     NCBI_API_KEY = api_key
@@ -346,7 +349,7 @@ def download_contig_lengths(
         console.log("⏭️  Skipping assembly_summary refresh (using local copy)")
 
     # Build allowed_assemblies as a DataFrame (not a Python set)
-    allowed_assemblies_df: Optional[pl.DataFrame] = None
+    allowed_assemblies_df: pl.DataFrame | None = None
     try:
         # Use lazy scan to get candidate IDs without loading full DataFrame
         candidate_ids_lf = (
@@ -423,7 +426,7 @@ def download_contig_lengths(
     
     # Use Polars filter instead of boolean mask indexing
     links_filtered = df_links.filter(pl.col("filetype") == "sequence_report")
-    pairs: List[Tuple[str, str]] = list(zip(
+    pairs: list[tuple[str, str]] = list(zip(
         links_filtered["assembly_id"].to_list(),
         links_filtered["url"].to_list()
     ))

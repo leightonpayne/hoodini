@@ -1,15 +1,17 @@
-import subprocess
-from pathlib import Path
-from rich.progress import (
-    Progress,
-    BarColumn,
-    TransferSpeedColumn,
-    TimeRemainingColumn,
-    TextColumn,
-)
-import requests
+import contextlib
 import re
+import subprocess
 import sys
+from pathlib import Path
+
+import requests
+from rich.progress import (
+    BarColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 
 
 def download_with_aria2c(
@@ -56,7 +58,7 @@ def download_with_aria2c(
                 return f"{n:.2f} {unit}"
             n /= 1024
 
-    from urllib.parse import urlparse, unquote
+    from urllib.parse import unquote, urlparse
 
     out_name_list = []
     for idx, url in enumerate(urls):
@@ -198,10 +200,8 @@ def download_with_aria2c(
         else:
             subprocess.run(cmd, check=True)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             Path(input_file).unlink()
-        except Exception:
-            pass
 
     for out_name in out_name_list:
         candidate = dest_dir / out_name

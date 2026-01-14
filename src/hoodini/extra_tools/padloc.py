@@ -1,10 +1,9 @@
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import polars as pl
 
-from hoodini.utils.logging_utils import info, warn
-
+from hoodini.utils.logging_utils import info
 
 
 def run_padloc(all_gff, all_prots, output: str | Path, num_threads):
@@ -43,9 +42,8 @@ def run_padloc(all_gff, all_prots, output: str | Path, num_threads):
                         curr_id = line[1:]
                         ids.append(curr_id)
                         seqs.append("")
-                    else:
-                        if seqs:
-                            seqs[-1] += line
+                    elif seqs:
+                        seqs[-1] += line
             fasta_df = pl.DataFrame({"id": ids, "sequence": seqs})
             temp_gff = temp_gff.join(fasta_df, on="id", how="left")
     temp_gff = temp_gff.with_columns(

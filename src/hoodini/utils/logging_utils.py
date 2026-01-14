@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-import os
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -72,7 +72,7 @@ def is_debug_enabled() -> bool:
     return _DEBUG and not _QUIET
 
 
-def header(title: str, subtitle: Optional[str] = None, border_style: str = "light_slate_grey") -> None:
+def header(title: str, subtitle: str | None = None, border_style: str = "light_slate_grey") -> None:
     """Render a boxed header with optional subtitle."""
     if _QUIET:
         return

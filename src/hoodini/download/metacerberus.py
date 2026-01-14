@@ -1,10 +1,13 @@
-from pathlib import Path
-from importlib.resources import files
-from hoodini.utils.logging_utils import console, info, warn, stage_header, logger
-from rich.table import Table
-import shutil
 import argparse
+import shutil
+from importlib.resources import files
+from pathlib import Path
+
+import requests
+from rich.table import Table
+
 from hoodini.utils.downloader import download_with_aria2c
+from hoodini.utils.logging_utils import console, info, logger, stage_header, warn
 
 PROJ = "3uz2j"
 PROV = "osfstorage"
@@ -13,17 +16,13 @@ ROOT_URL = f"https://api.osf.io/v2/nodes/{PROJ}/files/{PROV}/"
 DATA_DIR = files("hoodini").joinpath("data", "metacerberus")
 
 
-import requests
-
-
 def fetch_all_items(url):
     """Yield all items from a paginated OSF API endpoint."""
     while url:
         resp = requests.get(url)
         resp.raise_for_status()
         payload = resp.json()
-        for item in payload["data"]:
-            yield item
+        yield from payload["data"]
         url = payload["links"].get("next")
 
 

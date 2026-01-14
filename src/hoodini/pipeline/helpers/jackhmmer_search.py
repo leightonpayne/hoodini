@@ -1,13 +1,19 @@
 import argparse
 import multiprocessing
-from functools import partial
 from datetime import datetime
+from functools import partial
 
 import polars as pl
 import pyhmmer
 from networkx.utils.union_find import UnionFind
-from rich.progress import Progress, BarColumn, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 
 def process_sequence(seq, sequences, max_iterations=3):

@@ -1,12 +1,13 @@
+import contextlib
 from pathlib import Path
-from typing import List, Optional
 
 import polars as pl
-from hoodini.utils.logging_utils import logger
+
 from hoodini.utils.downloader import download_with_aria2c
+from hoodini.utils.logging_utils import logger
 
 
-def generate_summary_urls(dbs: List[str], include_historical: bool = True) -> List[str]:
+def generate_summary_urls(dbs: list[str], include_historical: bool = True) -> list[str]:
     """Generate NCBI assembly summary URLs based on database and historical flag."""
     suffixes = ["", "_historical"] if include_historical else [""]
     return [
@@ -16,7 +17,7 @@ def generate_summary_urls(dbs: List[str], include_historical: bool = True) -> Li
     ]
 
 
-def get_ncbi_header(file_path: Path) -> List[str]:
+def get_ncbi_header(file_path: Path) -> list[str]:
     """Extract header from an NCBI assembly summary file (line starting with #assembly_accession)."""
     with open(file_path, encoding="utf-8") as f:
         for line in f:
@@ -26,9 +27,9 @@ def get_ncbi_header(file_path: Path) -> List[str]:
 
 
 def download_assembly_db(
-    dbs: List[str],
+    dbs: list[str],
     output_path: Path,
-    columns_to_keep: Optional[List[str]] = None,
+    columns_to_keep: list[str] | None = None,
     include_historical: bool = True,
 ) -> None:
     """Download multiple assembly summary files using aria2c and save combined table."""
@@ -57,10 +58,8 @@ def download_assembly_db(
             )
         except Exception as e:
             logger.error(f"Failed to parse {file_path}: {e}")
-            try:
+            with contextlib.suppress(Exception):
                 Path(file_path).unlink()
-            except Exception:
-                pass
             continue
 
         if "assembly_accession" not in df.columns:
@@ -73,10 +72,8 @@ def download_assembly_db(
 
         dfs.append(df)
         logger.info(f"Done {file_path}")
-        try:
+        with contextlib.suppress(Exception):
             Path(file_path).unlink()
-        except Exception:
-            pass
 
     if not dfs:
         logger.warning("No dataframes were downloaded.")
@@ -90,7 +87,7 @@ def download_assembly_db(
     logger.info(f"Saved combined parquet to {output_path}")
 
 
-def download_assembly_summary_db(output_path: Optional[Path] = None) -> Path:
+def download_assembly_summary_db(output_path: Path | None = None) -> Path:
     """Convenience wrapper to download and merge RefSeq + GenBank assembly summaries."""
     from importlib.resources import files
 

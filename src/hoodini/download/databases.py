@@ -1,16 +1,12 @@
-import os
-import subprocess
-import tarfile
-from pathlib import Path
-from importlib.resources import files
-from typing import Optional
 import argparse
 import shutil
+import subprocess
+import tarfile
+from importlib.resources import files
+from pathlib import Path
 
-
-from hoodini.utils.logging_utils import info, warn, error, stage_header, stage_done
 from hoodini.utils.downloader import download_with_aria2c
-
+from hoodini.utils.logging_utils import error, info, stage_done, stage_header, warn
 
 EMAPPER_URL = "http://eggnog6.embl.de/download/emapperdb-5.0.2/mmseqs.tar.gz"
 EGGNOG_OG = "https://storage.hoodini.bio/eggnog_og.parquet"
@@ -18,7 +14,7 @@ EGGNOG_PROTS = "https://storage.hoodini.bio/eggnog_prots.parquet"
 CONTIGS_URL = "https://storage.hoodini.bio/contig_lengths.parquet"
 
 
-def _run_cmd(cmd, cwd: Optional[Path] = None):
+def _run_cmd(cmd, cwd: Path | None = None):
     try:
         info(f"Running: {' '.join(cmd)}")
         subprocess.run(cmd, check=True, cwd=(str(cwd) if cwd is not None else None))
@@ -138,33 +134,32 @@ def main(
 
     if skip_emapper:
         info("Skipping mmseqs/emapper DB download (--skip-emapper)")
-    else:
-        if force or not mmseqs_folder.exists():
-            warn("Downloading and extracting mmseqs; folder missing or --force is set")
+    elif force or not mmseqs_folder.exists():
+        warn("Downloading and extracting mmseqs; folder missing or --force is set")
 
-            ok = _download_url(EMAPPER_URL, emapper_tar, num_threads=num_threads)
-            if ok:
-                ok_extract = extract_tar(emapper_tar, emapper_dir, threads=num_threads)
-                if ok_extract:
-                    info(f"Extracted {emapper_tar.name} into {emapper_dir}")
-                else:
-                    warn(f"Failed to extract {emapper_tar.name}")
-                try:
-                    emapper_tar.unlink()
-                    info(f"Removed {emapper_tar} to save space")
-                except Exception as e:
-                    warn(f"Failed to remove {emapper_tar}: {e}")
-                padded_prefix = mmseqs_folder.joinpath("mmseqs.db_pad")
-                if not padded_prefix.exists():
-                    try:
-                        cmd = ["mmseqs", "makepaddedseqdb", "mmseqs.db", "mmseqs.db_pad"]
-                        _run_cmd(cmd, cwd=mmseqs_folder)
-                    except Exception as e:
-                        warn(f"Failed to create padded mmseqs DB: {e}")
+        ok = _download_url(EMAPPER_URL, emapper_tar, num_threads=num_threads)
+        if ok:
+            ok_extract = extract_tar(emapper_tar, emapper_dir, threads=num_threads)
+            if ok_extract:
+                info(f"Extracted {emapper_tar.name} into {emapper_dir}")
             else:
-                warn(f"Download failed from {EMAPPER_URL}")
+                warn(f"Failed to extract {emapper_tar.name}")
+            try:
+                emapper_tar.unlink()
+                info(f"Removed {emapper_tar} to save space")
+            except Exception as e:
+                warn(f"Failed to remove {emapper_tar}: {e}")
+            padded_prefix = mmseqs_folder.joinpath("mmseqs.db_pad")
+            if not padded_prefix.exists():
+                try:
+                    cmd = ["mmseqs", "makepaddedseqdb", "mmseqs.db", "mmseqs.db_pad"]
+                    _run_cmd(cmd, cwd=mmseqs_folder)
+                except Exception as e:
+                    warn(f"Failed to create padded mmseqs DB: {e}")
         else:
-            info(f"{mmseqs_folder} already exists; skipping download and extraction")
+            warn(f"Download failed from {EMAPPER_URL}")
+    else:
+        info(f"{mmseqs_folder} already exists; skipping download and extraction")
 
     if skip_parquet:
         info("Skipping eggNOG parquet support files (--skip-parquet)")
@@ -180,17 +175,16 @@ def main(
     contig_dest = contig_dir.joinpath("contig_lengths.parquet")
     if skip_contig_lengths:
         info("Skipping contig_lengths.parquet download (--skip-contig-lengths)")
+    elif force or not contig_dest.exists():
+        _download_url(CONTIGS_URL, contig_dest, num_threads=num_threads)
     else:
-        if force or not contig_dest.exists():
-            _download_url(CONTIGS_URL, contig_dest, num_threads=num_threads)
-        else:
-            info(f"{contig_dest} exists; use --force to re-download")
+        info(f"{contig_dest} exists; use --force to re-download")
 
     stage_done("Databases download complete")
 
 
 if __name__ == "__main__":
-p = argparse.ArgumentParser()
-p.add_argument("--force", action="store_true")
-args = p.parse_args()
-main(force=args.force)
+    p = argparse.ArgumentParser()
+    p.add_argument("--force", action="store_true")
+    args = p.parse_args()
+    main(force=args.force)

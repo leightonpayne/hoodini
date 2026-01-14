@@ -22,6 +22,7 @@ from rich.progress import (
 )
 from rich.table import Table
 from rich.text import Text
+
 from hoodini.utils.logging_utils import console
 
 BACDIVE_URL = "https://bacdive.dsmz.de/advsearch/csv?fg%5B0%5D%5Bgc%5D=OR&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfd%5D=Genome+seq.+accession+number&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfo%5D=contains&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfv%5D=%2A&fg%5B0%5D%5Bfl%5D%5B1%5D%5Bfvd%5D=sequence_genomes-sequence_acc-7&fg%5B0%5D%5Bfl%5D%5B2%5D=AND&fg%5B0%5D%5Bfl%5D%5B3%5D%5Bfd%5D=Genome+Sequence+database&fg%5B0%5D%5Bfl%5D%5B3%5D%5Bfv%5D=ncbi&fg%5B0%5D%5Bfl%5D%5B3%5D%5Bfvd%5D=sequence_genomes-source_db-7"

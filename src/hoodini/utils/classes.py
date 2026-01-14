@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Literal
 
 import polars as pl
-import xml.etree.ElementTree as ET
 
 Mode = Literal["ipg", "nuc2ass", "nucsum", "asssum"]
 

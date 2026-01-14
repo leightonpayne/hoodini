@@ -3,6 +3,7 @@ from ast import literal_eval
 from pathlib import Path
 
 import polars as pl
+
 from hoodini.utils.logging_utils import info
 
 
@@ -20,22 +21,6 @@ def run_cctyper(all_gff, all_prots, all_neigh, output, num_threads, valid_unique
         on="id",
         how="left",
     )
-
-    cols = [
-        "seqid",
-        "source",
-        "type",
-        "start",
-        "end",
-        "score",
-        "strand",
-        "phase",
-        "unique_id",
-        "attributes",
-        "start_win",
-        "end_win",
-        "temp_seqid",
-    ]
 
     valid = all_neigh.filter(pl.col("unique_id").is_in([str(n) for n in valid_unique_ids]))[
         ["start_win", "end_win", "temp_seqid", "unique_id"]

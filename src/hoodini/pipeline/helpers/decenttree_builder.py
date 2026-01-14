@@ -11,13 +11,14 @@ can be used with different input DataFrame schemas.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import platform
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from importlib.resources import files
 from pathlib import Path
-from typing import Iterable, Optional
 
 import polars as pl
 
@@ -87,7 +88,6 @@ def _build_relaxed_phylip(
         )
         fill_value = fill_missing
     ids = list(ids)
-    id_index = {idv: i for i, idv in enumerate(ids)}
     n = len(ids)
 
     if fill_value is None:
@@ -153,31 +153,27 @@ def run_decenttree_from_table(
     dcol: str = "distance",
     algorithm: str = "nj",
     threads: int = 1,
-    decenttree_bin: Optional[Path] = None,
+    decenttree_bin: Path | None = None,
     fill_missing=None,
-    ids: Optional[Iterable[str]] = None,
+    ids: Iterable[str] | None = None,
 ) -> str:
     """Run DecentTree on a Polars pairwise distance table and return a Newick string."""
     if decenttree_bin is None:
         decenttree_bin = _choose_decenttree_binary()
 
-    dt_df = df.clone() if hasattr(df, "clone") else df.select([c for c in df.columns])
+    dt_df = df.clone() if hasattr(df, "clone") else df.select(list(df.columns))
 
     if "AAI" in dt_df.columns and dcol not in dt_df.columns:
-        try:
+        with contextlib.suppress(Exception):
             dt_df = dt_df.with_columns(pl.col("AAI").cast(pl.Float64))
-        except Exception:
-            pass
         aai_max = dt_df["AAI"].max()
         if aai_max is not None and aai_max <= 1.0:
             dt_df = dt_df.with_columns((pl.col("AAI") * 100.0).alias("AAI"))
         dt_df = dt_df.with_columns((100.0 - pl.col("AAI")).alias("distance"))
         dcol_use = "distance"
     elif "ANI" in dt_df.columns and dcol not in dt_df.columns:
-        try:
+        with contextlib.suppress(Exception):
             dt_df = dt_df.with_columns(pl.col("ANI").cast(pl.Float64))
-        except Exception:
-            pass
         ani_max = dt_df["ANI"].max()
         if ani_max is not None and ani_max <= 1.0:
             dt_df = dt_df.with_columns((pl.col("ANI") * 100.0).alias("ANI"))
@@ -240,7 +236,7 @@ def run_decenttree_from_matrix(
     matrix_df: pl.DataFrame,
     algorithm: str = "nj",
     threads: int = 1,
-    decenttree_bin: Optional[Path] = None,
+    decenttree_bin: Path | None = None,
 ) -> str:
     """Run DecentTree on a square distance matrix (Polars) and return Newick."""
     if not isinstance(matrix_df, pl.DataFrame):

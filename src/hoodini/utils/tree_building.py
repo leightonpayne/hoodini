@@ -1,4 +1,9 @@
-from hoodini.utils.logging_utils import info, warn, error
+import itertools
+import sys
+
+import ete3
+
+from hoodini.utils.logging_utils import error, info, warn
 
 
 def calculate_taxid_distances(taxids, update_db=False):

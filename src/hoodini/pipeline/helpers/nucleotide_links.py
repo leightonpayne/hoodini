@@ -1,7 +1,7 @@
+import contextlib
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import polars as pl
 
@@ -36,9 +36,9 @@ def _resolve_path(name: str, output_dir: Path) -> Path:
 def run_nt_links(
     pairwise_ani: pl.DataFrame,
     output_dir: str,
-    all_neigh: Optional[pl.DataFrame] = None,
+    all_neigh: pl.DataFrame | None = None,
     threads: int = 8,
-    evalue: Optional[float] = None,
+    evalue: float | None = None,
     keep_temp: bool = False,
 ) -> pl.DataFrame:
     """Generate pairwise nucleotide visual blocks using fastANI --visualize.
@@ -188,10 +188,8 @@ def run_nt_links(
                 for ext in [".frag", ".fastani", ".log"]:
                     p = Path(str(temp_out) + ext)
                     if p.exists():
-                        try:
+                        with contextlib.suppress(Exception):
                             p.unlink()
-                        except Exception:
-                            pass
 
         try:
             parsed = pl.read_csv(
@@ -241,7 +239,7 @@ def run_nt_links(
                     else 0
                 )
 
-                for key in set([temp, seqid]):
+                for key in {temp, seqid}:
                     if not key:
                         continue
                     start_map[key] = start_win

@@ -4,14 +4,21 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from datetime import datetime
 
 import polars as pl
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-from hoodini.utils.logging_utils import info, warn, error
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
+from hoodini.utils.logging_utils import error, info, warn
 
 TOOL = "ipg_fetcher"
 CHUNK_SIZE = 100

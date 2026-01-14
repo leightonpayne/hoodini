@@ -6,6 +6,7 @@ import polars as pl
 
 from hoodini.utils.logging_utils import info
 
+
 def run_blast(all_neigh, output, blast, num_threads, valid_unique_ids):
     if blast:
         info("🔍\tRunning BLAST annotation...")

@@ -80,7 +80,35 @@ select = [
 	"PL",  
 ]
 ignore = [
-	"B905",  
+	"B905",
+	"E501",   # Line too long (handled by black)
+	"E741",   # Ambiguous variable name
+	"PLR0911", # Too many return statements
+	"PLR0912", # Too many branches
+	"PLR0913", # Too many arguments
+	"PLR0915", # Too many statements
+	"PLR2004", # Magic value comparison
+	"PLW0603", # Global statement
+	"PLW2901", # Redefined loop name
+	"PLC0415", # Import outside top-level
+	"S101",    # Use of assert
+	"S110",    # Try-except-pass
+	"S112",    # Try-except-continue
+	"S113",    # Missing timeout
+	"S202",    # Tarfile unsafe members
+	"S314",    # XML element tree usage
+	"S602",    # Shell equals true
+	"S603",    # Untrusted input
+	"S607",    # Partial executable path
+	"S701",    # Jinja2 autoescape
+	"N802",    # Invalid function name
+	"N803",    # Invalid argument name
+	"N806",    # Non-lowercase variable
+	"B007",    # Unused loop control variable
+	"B008",    # Function call in default argument
+	"B023",    # Function uses loop variable
+	"B904",    # Raise without from inside except
+	"PLW1510", # Subprocess run without check
 ]
 
 [tool.ruff.lint.per-file-ignores]

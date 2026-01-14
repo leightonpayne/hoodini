@@ -1,17 +1,26 @@
-from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import contextlib
 import math
 import os
-from pathlib import Path
 import subprocess
-from typing import Optional, Tuple
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
 
 import mappy as mp
 import polars as pl
 from Bio import SeqIO
-from rich.progress import Progress, TextColumn, BarColumn, SpinnerColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
-from hoodini.utils.logging_utils import console, info
+from hoodini.utils.logging_utils import info, warn
+
 
 def _is_na(x):
     try:
@@ -34,13 +43,13 @@ def _fasta_ids(fasta_path: str):
 def _fasta_lengths(path: str):
     idx = SeqIO.index(path, "fasta")
     try:
-        return {k: len(idx[k].seq) for k in idx.keys()}
+        return {k: len(idx[k].seq) for k in idx}
     finally:
         idx.close()
 
 
 def _write_intergenic_fasta(
-    all_gff, fasta_path: str, out_fasta: str, all_neigh: Optional[pl.DataFrame] = None
+    all_gff, fasta_path: str, out_fasta: str, all_neigh: pl.DataFrame | None = None
 ):
     """
     Create a FASTA of intergenic regions from neighborhoods.fasta using a GFF (path or DataFrame).
@@ -92,7 +101,7 @@ def _write_intergenic_fasta(
             )
             coding_intervals = []
 
-            start_win = start_map_init.get(canonical, None)
+            start_win = start_map_init.get(canonical)
             if start_win is not None:
                 for r in cand.iter_rows(named=True):
                     try:
@@ -124,11 +133,10 @@ def _write_intergenic_fasta(
             for iv in coding_intervals:
                 if not merged:
                     merged.append(list(iv))
+                elif iv[0] <= merged[-1][1] + 1:
+                    merged[-1][1] = max(merged[-1][1], iv[1])
                 else:
-                    if iv[0] <= merged[-1][1] + 1:
-                        merged[-1][1] = max(merged[-1][1], iv[1])
-                    else:
-                        merged.append([iv[0], iv[1]])
+                    merged.append([iv[0], iv[1]])
 
             intergenic = []
             pos = 1
@@ -240,7 +248,7 @@ def _skani_like_from_blast(
     out = []
     for q_id, t_id in pairs.iter_rows():
         g = df.filter((pl.col("qseqid") == q_id) & (pl.col("sseqid") == t_id))
-        hits = [r for r in g.iter_rows(named=True)]
+        hits = list(g.iter_rows(named=True))
         sel_idx = _select_non_overlapping_blast(hits, on=overlap_on, tol=overlap_tol)
         sel = [hits[i] for i in sel_idx]
 
@@ -518,17 +526,17 @@ def _skani_like_from_mappy(
 
 
 def run_pairwise_nt(
-    all_neigh: Optional[pl.DataFrame],
-    all_gff: Optional[object] = None,
+    all_neigh: pl.DataFrame | None,
+    all_gff: object | None = None,
     output_dir: str = "pairwise_nt_out",
-    nt_aln_mode: Optional[object] = None,
-    ani_mode: Optional[str] = None,
+    nt_aln_mode: object | None = None,
+    ani_mode: str | None = None,
     nt_links: bool = True,
-    threads: Optional[int] = None,
+    threads: int | None = None,
     blast_task: str = "blastn",
     evalue: float = 1e-5,
     perc_identity: int = 0,
-    word_size: Optional[int] = None,
+    word_size: int | None = None,
     soft_masking: str = "false",
     dust: str = "no",
     overlap_on: str = "query",
@@ -537,12 +545,12 @@ def run_pairwise_nt(
     mm2_preset: str = "asm20",
     mm2_min_mapq: int = 0,
     mm2_threads_per_worker: int = 1,
-) -> Tuple[pl.DataFrame, pl.DataFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     """
     Run pairwise nucleotide comparisons from a single FASTA and return (skani_like_df, alignment_rows_df).
     """
 
-    def _map_and_write_pairwise_ani_uid(df: pl.DataFrame, mode_suffix: Optional[str] = None):
+    def _map_and_write_pairwise_ani_uid(df: pl.DataFrame, mode_suffix: str | None = None):
         if df is None or df.height == 0:
             return None
         if all_neigh is None or all_neigh.height == 0:
@@ -614,10 +622,8 @@ def run_pairwise_nt(
         if write_outputs:
             suf = mode_suffix or str(nt_aln_mode)
             out_path = out / f"pairwise_ani_uid_{suf}.tsv"
-            try:
+            with contextlib.suppress(Exception):
                 agg.write_csv(out_path, separator="\t", include_header=False)
-            except Exception:
-                pass
 
         return agg
 
@@ -742,8 +748,7 @@ def run_pairwise_nt(
                 str(db_prefix),
             ],
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
         )
 
         outfmt = "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qlen slen"
@@ -985,8 +990,7 @@ def run_pairwise_nt(
         subprocess.run(
             ["makeblastdb", "-in", str(inter_fa), "-dbtype", "nucl", "-out", str(db_prefix)],
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
         )
 
         blast_tsv = tmp_dir / "intergenic_allvsall.outfmt6.tsv"
@@ -1479,7 +1483,7 @@ def run_pairwise_nt(
                     if ("start_win" in all_neigh.columns and nr.get("start_win") is not None)
                     else 0
                 )
-                for key in set([temp, seqid]):
+                for key in {temp, seqid}:
                     if not key:
                         continue
                     id_map[key] = seqid
@@ -1623,7 +1627,7 @@ def run_pairwise_nt(
                     if ("start_win" in all_neigh.columns and nr.get("start_win") is not None)
                     else 0
                 )
-                for key in set([temp, seqid]):
+                for key in {temp, seqid}:
                     if not key:
                         continue
                     start_map[key] = start_win

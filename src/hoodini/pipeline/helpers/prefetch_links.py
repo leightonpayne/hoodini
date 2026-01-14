@@ -14,15 +14,15 @@ from __future__ import annotations
 
 import argparse
 import base64
-import zlib
-from typing import Iterable, List, Optional
 import sys
+import zlib
+from collections.abc import Iterable
+from importlib.resources import files
 
 import polars as pl
 import requests
-from importlib.resources import files
 
-from hoodini.utils.logging_utils import console, warn, info
+from hoodini.utils.logging_utils import warn
 
 BASE = "https://api.ncbi.nlm.nih.gov/datasets/fetch_h"
 METHOD_SEQ_B64 = "QXNzZW1ibHlEYXRhc2V0SW50ZXJuYWwuR2V0U2VxdWVuY2VSZXBvcnQ"
@@ -98,7 +98,7 @@ def _find_in_json(obj, key: str):
     return None
 
 
-_LOCAL_ASM_MAP: Optional[dict] = None
+_LOCAL_ASM_MAP: dict | None = None
 
 
 def _load_local_assembly_map() -> dict:
@@ -167,7 +167,7 @@ def get_prefetched_link(
 
 def get_prefetched_link_table(
     asm_id_list: Iterable[str],
-    kinds: List[str] | None = None,
+    kinds: list[str] | None = None,
     *,
     seqrep_only: bool = False,
 ) -> pl.DataFrame:
@@ -225,7 +225,7 @@ def _cli():
 
     accs = list(args.accessions or [])
     if args.input:
-        with open(args.input, "r") as fh:
+        with open(args.input) as fh:
             accs.extend([l.strip() for l in fh if l.strip()])
 
     kinds = [x.strip() for x in args.kinds.split(",") if x.strip()]

@@ -10,9 +10,9 @@ Architecture:
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-import traceback
 from typing import Literal
 
 import gb_io
@@ -211,7 +211,7 @@ def parse_gff_faa(gff_path: str, faa_path: str) -> pl.DataFrame:
 
 def _read_fasta(filename: str) -> pl.DataFrame:
     """Read FASTA file into DataFrame with id and sequence columns."""
-    with open(filename, "r") as file:
+    with open(filename) as file:
         records = file.read().split(">")[1:]
         records = [record.split("\n", 1) for record in records]
         records = [(t[0].split(" ")[0], "".join(t[1].split())) for t in records]
@@ -378,7 +378,7 @@ def annotate_sorfs(
             )
 
     seq_upper = sequence.upper()
-    for i, (start, stop, strand, description) in enumerate(
+    for i, (start, stop, strand, _description) in enumerate(
         orfipy_core.orfs(seq_upper, minlen=100, maxlen=1000, partial3=False, between_stops=False)
     ):
         overlap_flag = False

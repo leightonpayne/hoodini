@@ -1,25 +1,23 @@
-import sys
-import shutil
 import datetime
-from pathlib import Path
-from typing import Optional, Union
+import shutil
+import sys
 from importlib.resources import files
+from pathlib import Path
 
 import polars as pl
-from rich.prompt import Prompt
 
 from hoodini.models.schemas import RECORDS
+from hoodini.pipeline.helpers.single_query import prepare_single_query_input
+from hoodini.utils.logging_utils import error, info, prompt, warn
 from hoodini.utils.polars_adapters import to_polars
 from hoodini.utils.validation import read_input_list, read_input_sheet, uniprot2ncbi
-from hoodini.utils.logging_utils import console, error, info, warn, prompt
-from hoodini.pipeline.helpers.single_query import prepare_single_query_input
 
 
 def initialize_inputs(
     *,
-    input_path: Optional[Union[Path, str]] = None,
-    inputsheet: Optional[Union[Path, str]] = None,
-    output: Optional[Union[Path, str]] = None,
+    input_path: Path | str | None = None,
+    inputsheet: Path | str | None = None,
+    output: Path | str | None = None,
     force: bool = False,
     remote_evalue: float = 1e-5,
     remote_max_targets: int = 100,

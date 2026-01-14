@@ -23,7 +23,7 @@ def validate_input_file(ctx, param, value):
         return value
 
     try:
-        with open(value, "r") as file:
+        with open(value) as file:
             if param.name == "input_path":
                 lines = [line.strip() for line in file.readlines() if line.strip()]
                 if len(lines) <= 1:
