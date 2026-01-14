@@ -1,4 +1,3 @@
-
 import multiprocessing as _mp
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -40,7 +39,7 @@ def in_jupyter():
         from IPython import get_ipython
 
         shell = get_ipython().__class__.__name__
-        return shell == "ZMQInteractiveShell"  
+        return shell == "ZMQInteractiveShell"
     except Exception:
         return False
 
@@ -78,7 +77,7 @@ def _enrich_proteins_with_metadata(
     return all_prots
 
 
-def     run_assembly_parser(
+def run_assembly_parser(
     records_df: pl.DataFrame,
     *,
     output_dir: Path | str | None = None,
@@ -164,12 +163,7 @@ def     run_assembly_parser(
         need_gbf = df["gbf_path"].is_null()
         need_struct = df["gff_path"].is_null() | df["faa_path"].is_null()  # fna optional
         mask = df["assembly_id"].is_not_null() & df["failed"].is_null() & need_gbf & need_struct
-        assembly_list = (
-            df.filter(mask)["assembly_id"]
-            .drop_nulls()
-            .unique()
-            .to_list()
-        )
+        assembly_list = df.filter(mask)["assembly_id"].drop_nulls().unique().to_list()
         # Normalize and keep only valid assembly accessions
         assembly_list = [
             str(aid).strip()
@@ -220,7 +214,9 @@ def     run_assembly_parser(
 
         missing_assemblies = set(assembly_list) - set(gbff_links["assembly_id"].unique())
         if missing_assemblies:
-            warn(f"The following assembly_ids were not found in the download links: {missing_assemblies}")
+            warn(
+                f"The following assembly_ids were not found in the download links: {missing_assemblies}"
+            )
 
         session = requests.Session()
         total_files = gbff_links.height
@@ -241,7 +237,9 @@ def     run_assembly_parser(
             )
 
             progress = Progress(
-                TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+                TextColumn(
+                    f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"
+                ),
                 SpinnerColumn(),
                 TextColumn("{task.description}"),
                 BarColumn(bar_width=40),
@@ -381,7 +379,9 @@ def     run_assembly_parser(
                     use_jupyter = False
             else:
                 progress = Progress(
-                    TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+                    TextColumn(
+                        f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"
+                    ),
                     SpinnerColumn(),
                     TextColumn("{task.description}"),
                     BarColumn(bar_width=40),
@@ -406,7 +406,7 @@ def     run_assembly_parser(
                     item = file_list[idx]
 
                     try:
-                        res = future.result(timeout=600)  
+                        res = future.result(timeout=600)
                         if res[0] is not None:
                             df_list.append(to_polars(res[0]))
                         if res[1] is not None:
@@ -465,9 +465,7 @@ def     run_assembly_parser(
             all_neigh = all_neigh.with_columns(
                 (pl.col("end_win") - pl.col("start_win")).alias("length")
             )
-            all_neigh.drop("sequence").write_csv(
-                output_dir / "all_neigh.tsv", separator="\t"
-            )
+            all_neigh.drop("sequence").write_csv(output_dir / "all_neigh.tsv", separator="\t")
 
             if minwin is not None:
                 if minwin_type == "total":
@@ -490,7 +488,7 @@ def     run_assembly_parser(
                         .unique()
                         .to_list()
                     )
-                else:  
+                else:
                     short_contigs = (
                         all_neigh.filter(
                             ((pl.col("start_target") - pl.col("start_win")) < minwin)

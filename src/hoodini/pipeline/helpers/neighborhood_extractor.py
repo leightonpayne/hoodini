@@ -26,14 +26,13 @@ from Bio.Seq import Seq
 class NeighborhoodResult:
     """Structured result from extract_neighborhood."""
 
-    proteins: pl.DataFrame  
-    neighborhood: pl.DataFrame  
+    proteins: pl.DataFrame
+    neighborhood: pl.DataFrame
     unique_id: str
 
 
 class NeighborhoodExtractionError(Exception):
     """Base exception for neighborhood extraction failures."""
-
 
 
 def parse_gbff(gbff_path: str, nucleotide_id: str | None = None) -> tuple[pl.DataFrame, object]:

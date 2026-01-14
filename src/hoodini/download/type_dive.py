@@ -117,7 +117,7 @@ def print_table(header, rows, title):
     table = Table(title=title, show_lines=True)
     for col in header:
         table.add_column(col, style="cyan")
-    for row in rows[:10]:  
+    for row in rows[:10]:
         table.add_row(*row)
     console.print(table)
 
@@ -184,8 +184,8 @@ def main():
     async def async_download():
         loop = asyncio.get_event_loop()
 
-        bacdive_size = 2 * 1024 * 1024  
-        phagedive_size = 30 * 1024  
+        bacdive_size = 2 * 1024 * 1024
+        phagedive_size = 30 * 1024
         t1 = progress.add_task("BacDive", total=bacdive_size)
         t2 = progress.add_task("PhageDive", total=phagedive_size)
 
@@ -199,7 +199,7 @@ def main():
                     total = 0
                     for line in decoder:
                         buf.write(line + "\n")
-                        total += len(line.encode("utf-8")) + 1  
+                        total += len(line.encode("utf-8")) + 1
                         progress.update(task_id, advance=len(line.encode("utf-8")) + 1)
                     buf.seek(0)
                 logger.info(f"Downloaded {desc} in memory")

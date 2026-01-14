@@ -4,8 +4,8 @@ import warnings
 from collections.abc import Iterable
 from pathlib import Path
 
-warnings.filterwarnings('ignore', category=UserWarning, module='UniProtMapper')
-warnings.filterwarnings('ignore', category=UserWarning, module='numpy.core.getlimits')
+warnings.filterwarnings("ignore", category=UserWarning, module="UniProtMapper")
+warnings.filterwarnings("ignore", category=UserWarning, module="numpy.core.getlimits")
 
 import numpy as np  # noqa: E402
 import polars as pl  # noqa: E402
@@ -71,7 +71,7 @@ def parse_taxonomy_and_build_tree(
         - tree_str: Newick format tree string
         - den_data: DataFrame with leaf_id, taxonomy columns, and neighborhood coordinates
     """
-    
+
     os.makedirs(output_dir, exist_ok=True)
 
     uid_map = {}
@@ -99,12 +99,7 @@ def parse_taxonomy_and_build_tree(
         if val is None:
             return None
         s = str(val)
-        return (
-            uid_map.get(s)
-            or uid_map.get(Path(s).name)
-            or uid_map.get(Path(s).stem)
-            or s
-        )
+        return uid_map.get(s) or uid_map.get(Path(s).name) or uid_map.get(Path(s).stem) or s
 
     if tree_mode == "taxonomy":
         tree_str = _make_taxonomic_tree(records)
@@ -280,7 +275,6 @@ def _build_leaf_metadata(records: pl.DataFrame, all_neigh: pl.DataFrame) -> pl.D
 
 def _make_tree(records, all_prots, output_dir, threads):
 
-
     valid = records.filter(pl.col("failed").is_null())
     prots = (
         valid.select(["protein_id", "unique_id"])
@@ -326,7 +320,7 @@ def _make_fast_phylo_tree(records, all_prots, output_dir, nj_algorithm, threads:
         faa = faa.join(id_to_uid, left_on="id", right_on="protein_id", how="left")
 
     # one sequence per unique_id; header uses unique_id to match original record
-    faa = faa.unique(subset=["unique_id"])  
+    faa = faa.unique(subset=["unique_id"])
     to_fasta(faa, "unique_id", "sequence", f"{output_dir}/target_prots.fasta")
     subprocess.run(
         [
@@ -387,13 +381,17 @@ def _make_neigh_similarity_tree(all_prot, all_neigh=None):
     binmat = mat.drop("target_prot")
     dist = pdist(binmat.to_numpy(), metric="jaccard")
     linkage = hierarchy.linkage(dist, method="single")
-    
+
     # Map target_prot to unique_id if all_neigh is available
     labels = mat["target_prot"].to_list()
-    if all_neigh is not None and "target_prot" in all_prot.columns and "unique_id" in all_prot.columns:
+    if (
+        all_neigh is not None
+        and "target_prot" in all_prot.columns
+        and "unique_id" in all_prot.columns
+    ):
         prot_to_uid = dict(all_prot.select(["target_prot", "unique_id"]).unique().iter_rows())
         labels = [prot_to_uid.get(tp, tp) for tp in labels]
-    
+
     return _linkage_to_newick(linkage, labels)
 
 
@@ -402,15 +400,19 @@ def _make_neigh_phylo_tree(records, all_prot, all_neigh=None, all_gff=None):
     if all_gff is None or all_gff.height == 0:
         # Fallback to simple similarity tree if we don't have position info
         return _make_neigh_similarity_tree(all_prot, all_neigh)
-    
+
     # Join all_prot with all_gff to get start/end positions
     # Assuming all_gff has 'id' that matches all_prot 'id', and 'start'/'end' columns
-    if "id" not in all_gff.columns or "start" not in all_gff.columns or "end" not in all_gff.columns:
+    if (
+        "id" not in all_gff.columns
+        or "start" not in all_gff.columns
+        or "end" not in all_gff.columns
+    ):
         return _make_neigh_similarity_tree(all_prot, all_neigh)
-    
+
     gff_pos = all_gff.select(["id", "start", "end", "unique_id"]).unique()
     prot_with_pos = all_prot.join(gff_pos, on="id", how="left", suffix="_gff")
-    
+
     # Calculate target positions for each unique_id
     target_positions = (
         prot_with_pos.filter(pl.col("id") == pl.col("target_prot"))
@@ -418,17 +420,15 @@ def _make_neigh_phylo_tree(records, all_prot, all_neigh=None, all_gff=None):
         .rename({"start": "target_start", "end": "target_end"})
         .unique()
     )
-    
+
     # Join to get target positions and calculate relative positions
-    prot_with_pos = prot_with_pos.join(
-        target_positions,
-        on="unique_id",
-        how="left"
-    ).with_columns([
-        (pl.col("start") - pl.col("target_start")).alias("rel_start"),
-        (pl.col("end") - pl.col("target_end")).alias("rel_end")
-    ])
-    
+    prot_with_pos = prot_with_pos.join(target_positions, on="unique_id", how="left").with_columns(
+        [
+            (pl.col("start") - pl.col("target_start")).alias("rel_start"),
+            (pl.col("end") - pl.col("target_end")).alias("rel_end"),
+        ]
+    )
+
     pa = prot_with_pos.filter(pl.col("id") != pl.col("target_prot")).with_columns(
         ((pl.col("rel_start") + pl.col("rel_end")) / 2).alias("rel_pos")
     )
@@ -453,13 +453,17 @@ def _make_neigh_phylo_tree(records, all_prot, all_neigh=None, all_gff=None):
     norm_vals = mat.select(feature_cols).to_numpy()
     dist = pdist(norm_vals, metric="cosine")
     linkage = hierarchy.linkage(dist, method="single")
-    
+
     # Map target_prot to unique_id if all_neigh is available
     labels = mat["target_prot"].to_list()
-    if all_neigh is not None and "target_prot" in all_prot.columns and "unique_id" in all_prot.columns:
+    if (
+        all_neigh is not None
+        and "target_prot" in all_prot.columns
+        and "unique_id" in all_prot.columns
+    ):
         prot_to_uid = dict(all_prot.select(["target_prot", "unique_id"]).unique().iter_rows())
         labels = [prot_to_uid.get(tp, tp) for tp in labels]
-    
+
     return _linkage_to_newick(linkage, labels)
 
 
@@ -657,9 +661,7 @@ def _make_foldmason_tree(records, all_prot, output_dir, threads):
     import pandas as pd
 
     mapper = ProtMapper()
-    mapped_pd, no_map = mapper.get(
-        ids=targets, from_db="EMBL-GenBank-DDBJ_CDS", to_db="UniProtKB"
-    )
+    mapped_pd, no_map = mapper.get(ids=targets, from_db="EMBL-GenBank-DDBJ_CDS", to_db="UniProtKB")
 
     # Check if ALL IDs failed to map - if so, we can't build a foldmason tree
     if set(no_map) == set(targets):
@@ -669,11 +671,17 @@ def _make_foldmason_tree(records, all_prot, output_dir, threads):
         console.print(
             "[yellow]Foldmason tree requires AlphaFold structures, which need UniProt IDs.[/yellow]"
         )
-        console.print("[yellow]Falling back to standard alignment tree (FAMSA + VeryFastTree).[/yellow]")
+        console.print(
+            "[yellow]Falling back to standard alignment tree (FAMSA + VeryFastTree).[/yellow]"
+        )
         return _make_tree(records, all_prot, output_dir, threads)
 
     mapped_pd = mapped_pd if mapped_pd is not None else pd.DataFrame()
-    mapped_pl = pl.from_pandas(mapped_pd) if mapped_pd is not None and not mapped_pd.empty else pl.DataFrame()
+    mapped_pl = (
+        pl.from_pandas(mapped_pd)
+        if mapped_pd is not None and not mapped_pd.empty
+        else pl.DataFrame()
+    )
 
     fetcher = AlphaFetcher(base_savedir=f"{output_dir}/struct")
     entries = mapped_pd["Entry"].unique().tolist() if not mapped_pd.empty else []
@@ -683,7 +691,11 @@ def _make_foldmason_tree(records, all_prot, output_dir, threads):
     else:
         fetcher.failed_ids = []
 
-    no_pdb = mapped_pd[mapped_pd["Entry"].isin(fetcher.failed_ids)]["From"].unique().tolist() if not mapped_pd.empty else []
+    no_pdb = (
+        mapped_pd[mapped_pd["Entry"].isin(fetcher.failed_ids)]["From"].unique().tolist()
+        if not mapped_pd.empty
+        else []
+    )
     no_pdb.extend(no_map)
     if entries:
         fetcher.download_all_files(pdb=True, cif=False, multithread=True, workers=threads)
@@ -741,16 +753,16 @@ def _make_foldmason_tree(records, all_prot, output_dir, threads):
 
 def _linkage_to_newick(linkage, labels):
     """Convert scipy linkage to Newick format string using iterative approach.
-    
+
     Avoids recursion depth limits by using explicit stack.
     Includes branch lengths from the linkage matrix.
     """
     tree = hierarchy.to_tree(linkage)
-    
+
     # Iterative post-order traversal
     stack = [(tree, False)]
     result_stack = []
-    
+
     while stack:
         node, visited = stack.pop()
         if node.is_leaf():
@@ -760,11 +772,11 @@ def _linkage_to_newick(linkage, labels):
             # Post-order: both children have been processed
             right_str, right_dist = result_stack.pop()
             left_str, left_dist = result_stack.pop()
-            
+
             # Calculate branch lengths from this node to children
             left_branch = node.dist - left_dist if left_dist < node.dist else 0.0
             right_branch = node.dist - right_dist if right_dist < node.dist else 0.0
-            
+
             # Format with branch lengths
             subtree = f"({left_str}:{left_branch:.6f},{right_str}:{right_branch:.6f})"
             result_stack.append((subtree, node.dist))
@@ -773,20 +785,20 @@ def _linkage_to_newick(linkage, labels):
             stack.append((node, True))
             stack.append((node.right, False))
             stack.append((node.left, False))
-    
+
     return result_stack[0][0] + ";"
 
 
 def calculate_taxid_distances(taxids, update_db=False):
     """Calculate pairwise taxonomic distances between taxids using taxoniq.
-    
+
     Distance is computed as the number of steps to the lowest common ancestor (LCA)
     from both taxa combined.
     """
     import itertools
-    
+
     taxids_int = [int(taxid) for taxid in taxids]
-    
+
     # Build lineage cache for each taxid
     lineage_cache = {}
     for taxid in taxids_int:
@@ -797,12 +809,12 @@ def calculate_taxid_distances(taxids, update_db=False):
         except Exception:
             # Fallback to unclassified if taxid not found
             lineage_cache[taxid] = [taxid, 1]  # 1 is root
-    
+
     distances = {}
     for taxid1, taxid2 in itertools.combinations(taxids_int, 2):
         lineage1 = set(lineage_cache[taxid1])
         lineage2 = set(lineage_cache[taxid2])
-        
+
         # Find lowest common ancestor (first shared taxid in lineages)
         common = lineage1 & lineage2
         if not common:
@@ -816,11 +828,19 @@ def calculate_taxid_distances(taxids, update_db=False):
                 if t in common:
                     lca = t
                     break
-            
-            dist1 = lineage_cache[taxid1].index(lca) if lca in lineage_cache[taxid1] else len(lineage_cache[taxid1])
-            dist2 = lineage_cache[taxid2].index(lca) if lca in lineage_cache[taxid2] else len(lineage_cache[taxid2])
+
+            dist1 = (
+                lineage_cache[taxid1].index(lca)
+                if lca in lineage_cache[taxid1]
+                else len(lineage_cache[taxid1])
+            )
+            dist2 = (
+                lineage_cache[taxid2].index(lca)
+                if lca in lineage_cache[taxid2]
+                else len(lineage_cache[taxid2])
+            )
             distance = dist1 + dist2
-        
+
         distances[(taxid1, taxid2)] = distance
-    
+
     return distances

@@ -104,7 +104,9 @@ def prompt(message: str, default: str | None = None) -> str:
     return console.input(prompt_text).strip()
 
 
-def run_with_spinner(title: str, func: Callable[..., Any], *args, spinner_name: str = "dots", **kwargs):
+def run_with_spinner(
+    title: str, func: Callable[..., Any], *args, spinner_name: str = "dots", **kwargs
+):
     """
     Display a Rich spinner with `title` while running `func(*args, **kwargs)`.
     Returns whatever `func` returns.

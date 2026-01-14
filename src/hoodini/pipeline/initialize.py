@@ -128,7 +128,9 @@ def check_assembly_db() -> None:
             age = now - mtime
             info(f"📁 Assembly DB found: {summary_path} (updated: {mtime:%Y-%m-%d})")
             if age > one_month:
-                warn("The assembly database is older than 30 days. Run 'hoodini download assembly_summary' to update.")
+                warn(
+                    "The assembly database is older than 30 days. Run 'hoodini download assembly_summary' to update."
+                )
             else:
                 info("✅ Using existing database (less than 1 month old).")
             return

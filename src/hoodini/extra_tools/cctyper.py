@@ -12,9 +12,7 @@ def run_cctyper(all_gff, all_prots, all_neigh, output, num_threads, valid_unique
     output = Path(output)
 
     temp_gff = all_gff.clone()
-    temp_gff = temp_gff.with_columns(
-        pl.col("attributes").str.extract(r"ID=([^;]+)", 1).alias("id")
-    )
+    temp_gff = temp_gff.with_columns(pl.col("attributes").str.extract(r"ID=([^;]+)", 1).alias("id"))
 
     temp_gff = temp_gff.join(
         all_prots.select([c for c in ["id", "unique_id", "sequence"] if c in all_prots.columns]),
@@ -48,7 +46,7 @@ def run_cctyper(all_gff, all_prots, all_neigh, output, num_threads, valid_unique
     temp_gff = temp_gff.unique(subset=["attributes", "seqid"])
 
     temp_gff.write_csv(output / "temp.gff", separator="\t", include_header=False)
-    
+
     command = [
         "cctyper",
         "--gff",
@@ -61,14 +59,16 @@ def run_cctyper(all_gff, all_prots, all_neigh, output, num_threads, valid_unique
         str(output / "cctyper"),
     ]
 
-    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    subprocess.run(
+        command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+    )
 
     operon_file = output / "cctyper" / "cas_operons.tab"
     genes_file = output / "cctyper" / "genes.tab"
-    
+
     if operon_file.exists():
         cctyper_df = pl.read_csv(operon_file, separator="\t", null_values="NA")
-        
+
         # Create lookup {(Contig, Pos): protein_id}
         gene_map = {}
         if genes_file.exists():

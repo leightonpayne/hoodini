@@ -198,9 +198,7 @@ def create_ncbi_links(
     for c in chunked_iterable(chunk_list, size=chunk_size):
         base_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/{engine}.fcgi?"
         if engine == "efetch":
-            chunk = ",".join(
-                [n.strip() for n in c if isinstance(n, str)]
-            )  
+            chunk = ",".join([n.strip() for n in c if isinstance(n, str)])
             base_url += f"&db={db}&rettype={rettype}&id="
         elif engine == "elink":
             if dbto is None:

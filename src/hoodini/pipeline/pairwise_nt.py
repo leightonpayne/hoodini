@@ -1361,7 +1361,9 @@ def run_pairwise_nt(
         seen_pairs = set()
 
         progress = Progress(
-            TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+            TextColumn(
+                f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"
+            ),
             SpinnerColumn(),
             TextColumn("{task.description}"),
             BarColumn(bar_width=40),
@@ -1560,7 +1562,9 @@ def run_pairwise_nt(
         rows = []
 
         with Progress(
-            TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
+            TextColumn(
+                f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"
+            ),
             SpinnerColumn(),
             TextColumn("{task.description}"),
             BarColumn(bar_width=40),
@@ -1576,7 +1580,9 @@ def run_pairwise_nt(
 
         hits_df = pl.DataFrame(rows)
         if write_outputs:
-            hits_df.write_csv(tmp_dir / "pairwise_hits_mappy.tsv", separator="\t", include_header=False)
+            hits_df.write_csv(
+                tmp_dir / "pairwise_hits_mappy.tsv", separator="\t", include_header=False
+            )
 
         skani_df = _skani_like_from_mappy(
             hits_df,
@@ -1588,7 +1594,9 @@ def run_pairwise_nt(
             return_percent=True,
         )
         if write_outputs:
-            skani_df.write_csv(tmp_dir / "skani_like_mappy.tsv", separator="\t", include_header=False)
+            skani_df.write_csv(
+                tmp_dir / "skani_like_mappy.tsv", separator="\t", include_header=False
+            )
 
         try:
             agg_uid = _map_and_write_pairwise_ani_uid(skani_df, mode_suffix="mappy")

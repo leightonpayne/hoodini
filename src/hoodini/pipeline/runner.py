@@ -96,10 +96,11 @@ def run_pipeline(config: RuntimeConfig) -> None:
             - {output}/hoodini-viz/tree.nwk
             - {output}/hoodini-viz/hoodini-viz.html (standalone viewer with embedded data)
     """
-    
+
     stage_header("Initializing Hoodini", "🚀")
-    
+
     from hoodini.pipeline.initialize import initialize_inputs
+
     records = initialize_inputs(
         input_path=config.input_path,
         inputsheet=config.inputsheet,
@@ -258,10 +259,9 @@ def run_pipeline(config: RuntimeConfig) -> None:
         pairwise_aai=pairwise_aai,
     )
 
-
     domains_data = None
     ncrna_data = None
-    
+
     if config.domains:
         from hoodini.extra_tools.domain import run_domain
 
@@ -323,7 +323,9 @@ def run_pipeline(config: RuntimeConfig) -> None:
     if config.cctyper:
         from hoodini.extra_tools.cctyper import run_cctyper
 
-        cctyper_df, crispr_df = run_cctyper(all_gff, all_prots, all_neigh, config.output, config.num_threads, valid_uids)
+        cctyper_df, crispr_df = run_cctyper(
+            all_gff, all_prots, all_neigh, config.output, config.num_threads, valid_uids
+        )
         if cctyper_df.height > 0:
             all_prots = all_prots.join(cctyper_df, on="id", how="left")
         if crispr_df.height > 0:
@@ -381,8 +383,6 @@ def run_pipeline(config: RuntimeConfig) -> None:
                 ]
             )
             all_gff = pl.concat([all_gff, gff_df], how="vertical")
-
-
 
     stage_done("Extra annotation complete")
 

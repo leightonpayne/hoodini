@@ -113,12 +113,12 @@ def main(
     genomad_db = data_dir.joinpath("genomad_db")
 
     if not skip_padloc:
-        _run_cmd(["padloc", "--db-update"])  
+        _run_cmd(["padloc", "--db-update"])
     else:
         info("Skipping padloc DB update (--skip-padloc)")
 
     if not skip_deffinder:
-        _run_cmd(["defense-finder", "update"])  
+        _run_cmd(["defense-finder", "update"])
     else:
         info("Skipping defense-finder model install (--skip-deffinder)")
 

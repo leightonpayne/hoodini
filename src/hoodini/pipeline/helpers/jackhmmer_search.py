@@ -37,14 +37,19 @@ def run_jackhmmer(faa, cpus=multiprocessing.cpu_count(), max_iterations=3):
     )
 
     dicc_hits = {}
-    with multiprocessing.Pool(cpus) as pool, Progress(
-        TextColumn(f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"),
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        BarColumn(bar_width=40),
-        TimeElapsedColumn(),
-        TimeRemainingColumn(),
-    ) as progress:
+    with (
+        multiprocessing.Pool(cpus) as pool,
+        Progress(
+            TextColumn(
+                f"[grey53][[/grey53][light_slate_grey]{datetime.now():%H:%M:%S}[/light_slate_grey][grey53]][/grey53]"
+            ),
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=40),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+        ) as progress,
+    ):
         task = progress.add_task("Running jackhmmer clustering...", total=len(sequences))
         for name, hits in pool.imap_unordered(process_sequence_partial, sequences):
             dicc_hits[name] = hits
@@ -87,7 +92,7 @@ def main():
 
     df = parallel_jackhmmer(args.fasta, args.cpus, args.max_iterations, args.min_evalue)
 
-    df.write_csv(args.output, include_header=False)  
+    df.write_csv(args.output, include_header=False)
 
 
 if __name__ == "__main__":

@@ -4,9 +4,7 @@ import polars as pl
 
 from hoodini.utils.logging_utils import info
 
-hive_dir = Path(
-    "/home/klaupaucius/software/hoodini/hoodini/data/contig_lengths"
-)  
+hive_dir = Path("/home/klaupaucius/software/hoodini/hoodini/data/contig_lengths")
 output_file = Path(
     "/home/klaupaucius/software/hoodini/hoodini/data/contig_lengths/contig_lengths.parquet"
 )

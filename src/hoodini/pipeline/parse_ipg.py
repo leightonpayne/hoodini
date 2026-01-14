@@ -26,16 +26,16 @@ def safe_collect(lf: pl.LazyFrame) -> PlDF:
 
 def run_ipg(records_df: PlDF, *, cand_mode: str) -> PlDF:
     """Polars-based IPG enrichment pipeline.
-    
+
     Expected Files:
     ---------------
     - records_df: DataFrame from initialize_inputs with protein IDs
     - Remote APIs: NCBI IPG web service, assembly reports (FTP)
-    
+
     Generated Files:
     ----------------
     - None (all data kept in memory/DataFrame)
-    
+
     Process:
     --------
     1. Fetches IPG (Identical Protein Groups) records from NCBI for input protein IDs
@@ -43,10 +43,10 @@ def run_ipg(records_df: PlDF, *, cand_mode: str) -> PlDF:
     3. Applies candidate selection mode ('all', 'best', or 'model')
     4. Enriches records with assembly metadata (taxid, organism, strain)
     5. Computes assembly lengths and filters candidates
-    
+
     Returns:
     --------
-    pl.DataFrame: Enriched records with columns: og_index, protein_id, nucleotide_id, 
+    pl.DataFrame: Enriched records with columns: og_index, protein_id, nucleotide_id,
                   assembly, taxid, organism, strain, unique_id, etc.
     """
     df = records_df.clone()
@@ -119,10 +119,7 @@ def _fill_ipg_polars(records: PlDF, ipg_df: PlDF) -> PlDF:
         & (pl.col("ipg_id").is_null())
     )
     records = records.with_columns(
-        pl.when(cond)
-        .then(True)
-        .otherwise(pl.col("failed"))
-        .alias("failed"),
+        pl.when(cond).then(True).otherwise(pl.col("failed")).alias("failed"),
         pl.when(cond)
         .then(pl.lit("Unable to retrieve IPG"))
         .otherwise(pl.col("failed_reason"))
@@ -155,9 +152,7 @@ def _fill_ipg_polars(records: PlDF, ipg_df: PlDF) -> PlDF:
 def _fetch_ipg_data(df: PlDF, cand_mode: str) -> PlDF:
     """Fetch IPG data for proteins and enrich with assembly/taxid info."""
     cond_mask = (
-        (pl.col("protein_id").is_not_null())
-        & (pl.col("failed").is_null())
-        & (~pl.col("premade"))  
+        (pl.col("protein_id").is_not_null()) & (pl.col("failed").is_null()) & (~pl.col("premade"))
     )
 
     proteins = df.filter(cond_mask).select("protein_id").unique().to_series().to_list()
@@ -232,7 +227,12 @@ def _fetch_ipg_data(df: PlDF, cand_mode: str) -> PlDF:
     def fix_asm(nuc_id: str | None, asm_id: str | None) -> str | None:
         if nuc_id is None or asm_id is None:
             return asm_id
-        if is_refseq_nuccore(nuc_id) and str(asm_id).startswith("GCA_") or not is_refseq_nuccore(nuc_id) and str(asm_id).startswith("GCF_"):
+        if (
+            is_refseq_nuccore(nuc_id)
+            and str(asm_id).startswith("GCA_")
+            or not is_refseq_nuccore(nuc_id)
+            and str(asm_id).startswith("GCF_")
+        ):
             return switch_assembly_prefix(asm_id)
         return asm_id
 
@@ -274,9 +274,7 @@ def _fetch_nucleotide_data(df: PlDF) -> PlDF:
             contig_path,
             missing_columns="insert",
             extra_columns="ignore",
-        ).filter(
-            (pl.col("genbankAccession").is_in(nucs)) | (pl.col("refseqAccession").is_in(nucs))
-        )
+        ).filter((pl.col("genbankAccession").is_in(nucs)) | (pl.col("refseqAccession").is_in(nucs)))
 
         summary_scan = pl.scan_parquet(summary_path).select(
             [
@@ -713,7 +711,15 @@ def _select_best_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
 
 def _finalize_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
     """Mark records as failed if they don't meet requirements."""
-    for col in ["group", "gff_path", "faa_path", "assembly_id", "failed", "premade", "failed_reason"]:
+    for col in [
+        "group",
+        "gff_path",
+        "faa_path",
+        "assembly_id",
+        "failed",
+        "premade",
+        "failed_reason",
+    ]:
         if col not in df.columns:
             df = df.with_columns(pl.lit(None).alias(col))
 
@@ -729,10 +735,7 @@ def _finalize_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
     )
     to_fail1 = cond1 & pl.col("assembly_id").is_null()
     df = df.with_columns(
-        pl.when(to_fail1)
-        .then(True)
-        .otherwise(pl.col("failed"))
-        .alias("failed"),
+        pl.when(to_fail1).then(True).otherwise(pl.col("failed")).alias("failed"),
         pl.when(to_fail1)
         .then(pl.lit("Unable to retrieve IPG/Nuccore data"))
         .otherwise(pl.col("failed_reason"))
@@ -752,10 +755,7 @@ def _finalize_ipg(df: pl.DataFrame, cand_mode: str) -> pl.DataFrame:
     )
     to_invalid = cond2 & (~pl.col("group").is_in(valid))
     df = df.with_columns(
-        pl.when(to_invalid)
-        .then(True)
-        .otherwise(pl.col("failed"))
-        .alias("failed"),
+        pl.when(to_invalid).then(True).otherwise(pl.col("failed")).alias("failed"),
         pl.when(to_invalid)
         .then(pl.lit("Invalid superkingdom"))
         .otherwise(pl.col("failed_reason"))

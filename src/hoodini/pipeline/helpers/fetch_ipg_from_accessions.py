@@ -23,8 +23,8 @@ from hoodini.utils.logging_utils import error, info, warn
 TOOL = "ipg_fetcher"
 CHUNK_SIZE = 100
 
-DEFAULT_MAX_CONCURRENT = 9  
-DEFAULT_FALLBACK_CONCURRENT = 3  
+DEFAULT_MAX_CONCURRENT = 9
+DEFAULT_FALLBACK_CONCURRENT = 3
 NCBI_API_KEY = os.environ.get("NCBI_API_KEY")
 MAX_WORKERS = DEFAULT_MAX_CONCURRENT if NCBI_API_KEY else DEFAULT_FALLBACK_CONCURRENT
 MAX_PARALLEL = MAX_WORKERS
@@ -51,7 +51,9 @@ def _efetch_chunk(accessions: list[str]) -> str:
         try:
             result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=90)
             if not result.stdout or not result.stdout.strip():
-                if ("500" in result.stderr or "ERROR" in result.stderr) and attempt < max_retries - 1:
+                if (
+                    "500" in result.stderr or "ERROR" in result.stderr
+                ) and attempt < max_retries - 1:
                     warn(
                         f"efetch error 500/network issue (attempt {attempt+1}/{max_retries}), retrying in 5s..."
                     )
@@ -77,9 +79,7 @@ def _efetch_chunk(accessions: list[str]) -> str:
                 warn(f"efetch timeout (attempt {attempt+1}/{max_retries}), retrying...")
                 time.sleep(5)
                 continue
-            error(
-                f"efetch timeout for IDs {accessions[:3]}... after {max_retries} attempts"
-            )
+            error(f"efetch timeout for IDs {accessions[:3]}... after {max_retries} attempts")
             return ""
 
     return ""

@@ -247,9 +247,9 @@ def run_domain(
                     task = progress.add_task(db, total=total)
                     for hits in pyhmmer.hmmsearch(hmms, sequences, cpus=num_threads, E=1e-5):
                         hmm_id = hits.query.name.decode()
-                        for hit in hits.included:  
+                        for hit in hits.included:
                             protein_id = hit.name.decode()
-                            for domain in hit.domains.included:  
+                            for domain in hit.domains.included:
                                 start = int(domain.env_from)
                                 end = int(domain.env_to)
                                 length = end - start + 1

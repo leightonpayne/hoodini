@@ -13,9 +13,9 @@ def load_default_config() -> dict:
     flat = {}
     for section, values in grouped.items():
         if isinstance(values, dict):
-            flat.update(values)  
+            flat.update(values)
         else:
-            flat[section] = values  
+            flat[section] = values
     return flat
 
 

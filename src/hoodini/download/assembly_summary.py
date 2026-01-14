@@ -49,8 +49,8 @@ def download_assembly_db(
             df = pl.read_csv(
                 file_path,
                 separator="\t",
-                comment_prefix="#",  
-                has_header=False,  
+                comment_prefix="#",
+                has_header=False,
                 new_columns=header,
                 quote_char=None,
                 null_values="na",

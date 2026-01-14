@@ -1,4 +1,3 @@
-
 import logging
 import os
 import sys
@@ -56,7 +55,15 @@ click.rich_click.OPTION_GROUPS = {
         },
         {
             "name": "Pairwise Comparisons",
-            "options": ["--prot-links", "--nt-links", "--ani-mode", "--nt-aln-mode", "--aai-mode", "--aai-subset-mode", "--min-pident"],
+            "options": [
+                "--prot-links",
+                "--nt-links",
+                "--ani-mode",
+                "--nt-aln-mode",
+                "--aai-mode",
+                "--aai-subset-mode",
+                "--min-pident",
+            ],
         },
         {
             "name": "Remote BLAST",
@@ -64,7 +71,16 @@ click.rich_click.OPTION_GROUPS = {
         },
         {
             "name": "Annotations",
-            "options": ["--padloc", "--deffinder", "--cctyper", "--ncrna", "--genomad", "--sorfs", "--emapper", "--domains"],
+            "options": [
+                "--padloc",
+                "--deffinder",
+                "--cctyper",
+                "--ncrna",
+                "--genomad",
+                "--sorfs",
+                "--emapper",
+                "--domains",
+            ],
         },
         {
             "name": "Logging",

@@ -90,7 +90,7 @@ def extract_neighborhood(
                 None,
                 unique_id,
                 "GenBank file not found",
-            )  
+            )
 
         try:
             record_iter = gb_io.iter(gbf_file)
@@ -124,9 +124,7 @@ def extract_neighborhood(
             if "protein_id" in feature_data.columns and not (start and end):
                 start = feature_data[feature_data["protein_id"] == protein_id]["start"].iloc[0]
                 end = feature_data[feature_data["protein_id"] == protein_id]["end"].iloc[0]
-                strand = feature_data[feature_data["protein_id"] == protein_id]["strand"].iloc[
-                    0
-                ]
+                strand = feature_data[feature_data["protein_id"] == protein_id]["strand"].iloc[0]
             start, end = int(start), int(end)
 
             if mode == "win_nts":
@@ -241,7 +239,7 @@ def extract_neighborhood(
                             "phase": ".",
                             "protein_id": f"sORF_{unique_id}_{i}",
                             "id": f"sORF_{unique_id}_{i}",
-                            "sequence": pred.translate(),  
+                            "sequence": pred.translate(),
                         }
                     )
 
@@ -264,16 +262,10 @@ def extract_neighborhood(
                         break
 
                 if not overlap_flag:
-                    orf_sequence = Seq(
-                        record.sequence[start_win:end_win][start:stop]
-                    )  
-                    if strand == "-":  
-                        orf_sequence = (
-                            orf_sequence.reverse_complement()
-                        )  
-                    protein_sequence = orf_sequence.translate(
-                        table=11, to_stop=True
-                    )  
+                    orf_sequence = Seq(record.sequence[start_win:end_win][start:stop])
+                    if strand == "-":
+                        orf_sequence = orf_sequence.reverse_complement()
+                    protein_sequence = orf_sequence.translate(table=11, to_stop=True)
 
                     new_genes.append(
                         {
@@ -315,7 +307,7 @@ def extract_neighborhood(
                 None,
                 unique_id,
                 "GFF file not found",
-            )  
+            )
         if not Path(faa_file).exists():
             return None, None, unique_id, "FAA file not found"
 
@@ -404,7 +396,14 @@ def extract_neighborhood(
                 if strand == "-":
                     pass
 
-            elif not window and nucleotide_id and not (start and end) or window and nucleotide_id and not (start and end):
+            elif (
+                not window
+                and nucleotide_id
+                and not (start and end)
+                or window
+                and nucleotide_id
+                and not (start and end)
+            ):
                 start = end = 0
                 subgff = gff.query("seqid == @nucleotide_id & type =='CDS'")
                 start_win = 0
@@ -417,7 +416,7 @@ def extract_neighborhood(
                     None,
                     unique_id,
                     "Invalid usage of parameters",
-                )  
+                )
 
         subgff = unwrap_attributes(subgff)
         key_join = "protein_id" if "protein_id" in subgff.columns else "ID"
@@ -460,7 +459,7 @@ def extract_neighborhood(
                                     "strand": "-" if pred.strand == "-1" else "+",
                                     "phase": ".",
                                     key_join: f"{key_join}=sORF_{unique_id}_{i}",
-                                    "sequence": pred.translate(),  
+                                    "sequence": pred.translate(),
                                 }
                             )
 

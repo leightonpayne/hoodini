@@ -18,7 +18,7 @@ def _append_extra_tool_gffs(
 ) -> pl.DataFrame:
     """
     Internal helper to transform and concatenate extra tool outputs to GFF format.
-    
+
     Parameters:
     -----------
     all_gff: Base GFF DataFrame from assembly parsing
@@ -26,73 +26,81 @@ def _append_extra_tool_gffs(
     crispr_df: Raw CCTyper CRISPR array predictions
     ncrna_data: Raw ncRNA predictions from cmsearch
     genomad_df: Raw geNomad MGE predictions
-    
+
     Returns:
     --------
     pl.DataFrame: Extended GFF with all tool results concatenated
     """
     result_gff = all_gff.clone()
-    
+
     # BLAST regions
     if blast_data is not None and blast_data.height > 0:
-        gff_df = pl.DataFrame({
-            "seqid": blast_data["seqid"],
-            "source": "hoodini",
-            "type": "region",
-            "start": blast_data["start"],
-            "end": blast_data["end"],
-            "score": ".",
-            "strand": "+",
-            "phase": ".",
-            "attributes": "ID=" + blast_data["nc_feature"] + ";",
-        })
+        gff_df = pl.DataFrame(
+            {
+                "seqid": blast_data["seqid"],
+                "source": "hoodini",
+                "type": "region",
+                "start": blast_data["start"],
+                "end": blast_data["end"],
+                "score": ".",
+                "strand": "+",
+                "phase": ".",
+                "attributes": "ID=" + blast_data["nc_feature"] + ";",
+            }
+        )
         result_gff = pl.concat([result_gff, gff_df], how="vertical")
-    
+
     # CCTyper CRISPR arrays
     if crispr_df is not None and crispr_df.height > 0:
-        gff_df = crispr_df.select([
-            pl.col("seqid"),
-            pl.lit("hoodini").alias("source"),
-            pl.lit("region").alias("type"),
-            pl.col("start"),
-            pl.col("end"),
-            pl.lit(".").alias("score"),
-            pl.lit(".").alias("strand"),
-            pl.lit(".").alias("phase"),
-            (pl.lit("ID=") + pl.col("nc_feature") + pl.lit(";")).alias("attributes"),
-        ])
+        gff_df = crispr_df.select(
+            [
+                pl.col("seqid"),
+                pl.lit("hoodini").alias("source"),
+                pl.lit("region").alias("type"),
+                pl.col("start"),
+                pl.col("end"),
+                pl.lit(".").alias("score"),
+                pl.lit(".").alias("strand"),
+                pl.lit(".").alias("phase"),
+                (pl.lit("ID=") + pl.col("nc_feature") + pl.lit(";")).alias("attributes"),
+            ]
+        )
         result_gff = pl.concat([result_gff, gff_df], how="vertical")
-    
+
     # ncRNA predictions
     if ncrna_data is not None and ncrna_data.height > 0:
-        gff_df = ncrna_data.select([
-            pl.col("nucid").alias("seqid"),
-            pl.lit("hoodini").alias("source"),
-            pl.lit("ncRNA").alias("type"),
-            pl.min_horizontal([pl.col("start"), pl.col("end")]).alias("start"),
-            pl.max_horizontal([pl.col("start"), pl.col("end")]).alias("end"),
-            pl.lit(".").alias("score"),
-            pl.col("strand_ncrna").alias("strand"),
-            pl.lit(".").alias("phase"),
-            (pl.lit("ID=") + pl.col("nc_feature") + pl.lit(";")).alias("attributes"),
-        ])
+        gff_df = ncrna_data.select(
+            [
+                pl.col("nucid").alias("seqid"),
+                pl.lit("hoodini").alias("source"),
+                pl.lit("ncRNA").alias("type"),
+                pl.min_horizontal([pl.col("start"), pl.col("end")]).alias("start"),
+                pl.max_horizontal([pl.col("start"), pl.col("end")]).alias("end"),
+                pl.lit(".").alias("score"),
+                pl.col("strand_ncrna").alias("strand"),
+                pl.lit(".").alias("phase"),
+                (pl.lit("ID=") + pl.col("nc_feature") + pl.lit(";")).alias("attributes"),
+            ]
+        )
         result_gff = pl.concat([result_gff, gff_df], how="vertical")
-    
+
     # geNomad MGE regions
     if genomad_df is not None and genomad_df.height > 0:
-        gff_df = genomad_df.select([
-            pl.col("seqid"),
-            pl.lit("hoodini").alias("source"),
-            pl.lit("region").alias("type"),
-            pl.min_horizontal([pl.col("start"), pl.col("end")]).alias("start"),
-            pl.max_horizontal([pl.col("start"), pl.col("end")]).alias("end"),
-            pl.lit(".").alias("score"),
-            pl.lit(".Z").alias("strand"),
-            pl.lit(".").alias("phase"),
-            (pl.lit("ID=") + pl.col("mge_type") + pl.lit(";")).alias("attributes"),
-        ])
+        gff_df = genomad_df.select(
+            [
+                pl.col("seqid"),
+                pl.lit("hoodini").alias("source"),
+                pl.lit("region").alias("type"),
+                pl.min_horizontal([pl.col("start"), pl.col("end")]).alias("start"),
+                pl.max_horizontal([pl.col("start"), pl.col("end")]).alias("end"),
+                pl.lit(".").alias("score"),
+                pl.lit(".Z").alias("strand"),
+                pl.lit(".").alias("phase"),
+                (pl.lit("ID=") + pl.col("mge_type") + pl.lit(";")).alias("attributes"),
+            ]
+        )
         result_gff = pl.concat([result_gff, gff_df], how="vertical")
-    
+
     return result_gff
 
 
@@ -178,7 +186,7 @@ def write_viz_outputs(
         ncrna_data=ncrna_data,
         genomad_df=genomad_df,
     )
-    
+
     outdir = Path(output_dir) / "hoodini-viz"
     outdir.mkdir(parents=True, exist_ok=True)
     parquet_dir = outdir / "parquet"
@@ -216,9 +224,7 @@ def write_viz_outputs(
 
         if "attributes" in gff_df.columns:
             gff_df = gff_df.with_columns(
-                pl.col("attributes")
-                .map_elements(normalize_attributes)
-                .cast(pl.Utf8, strict=False)
+                pl.col("attributes").map_elements(normalize_attributes).cast(pl.Utf8, strict=False)
             )
         # GFF text under tsv/, parquet under parquet/
         gff_df.write_csv(tsv_dir / "gff.gff", include_header=False, separator="\t")
@@ -243,9 +249,7 @@ def write_viz_outputs(
         cols = [c for c in ["hood_id", "seqid", "start", "end", "align_gene"] if c in neigh.columns]
         if cols:
             csv_data = neigh.select(cols).write_csv(separator="\t", include_header=False)
-            (tsv_dir / "hoods.txt").write_text(
-                hoods_headers + csv_data, encoding="utf-8"
-            )
+            (tsv_dir / "hoods.txt").write_text(hoods_headers + csv_data, encoding="utf-8")
             neigh.select(cols).write_parquet(parquet_dir / "hoods.parquet")
         else:
             (tsv_dir / "hoods.txt").write_text(hoods_headers, encoding="utf-8")
@@ -305,20 +309,18 @@ def write_viz_outputs(
                 prots = prots.with_columns(
                     pl.col(col)
                     .cast(pl.Utf8)
-                    .str.replace_all("\r\n", " ")  
-                    .str.replace_all("\n", " ")  
-                    .str.replace_all("\r", " ")  
-                    .str.replace_all("`", "'")  
-                    .str.replace_all('"', "'")  
+                    .str.replace_all("\r\n", " ")
+                    .str.replace_all("\n", " ")
+                    .str.replace_all("\r", " ")
+                    .str.replace_all("`", "'")
+                    .str.replace_all('"', "'")
                     .alias(col)
                 )
             elif col_dtype in (pl.Float64, pl.Float32):
                 prots = prots.with_columns(pl.col(col).round(2).alias(col))
         csv_data = prots.write_csv(separator="\t", include_header=False)
         protein_headers = "\t".join(prots.columns) + "\n"
-        (tsv_dir / "protein_metadata.txt").write_text(
-            protein_headers + csv_data, encoding="utf-8"
-        )
+        (tsv_dir / "protein_metadata.txt").write_text(protein_headers + csv_data, encoding="utf-8")
         prots.write_parquet(parquet_dir / "protein_metadata.parquet")
     else:
         protein_headers = "\t".join(base_headers) + "\n"
@@ -405,7 +407,9 @@ def write_viz_outputs(
                 }
             )
 
-        df_domains.select(["gene_id", "domainName", "start", "end", "source", "evalue", "coverage"]).write_csv(
+        df_domains.select(
+            ["gene_id", "domainName", "start", "end", "source", "evalue", "coverage"]
+        ).write_csv(
             tsv_dir / "domains.txt",
             separator="\t",
             include_header=False,
@@ -433,12 +437,16 @@ def write_viz_outputs(
             "coverage_norm",
         }
         drop_meta = {"bit_score*alignment_length", "domain_id_base", "domain_id_clean"}
-        meta_candidates = [c for c in df.columns if c not in metadata_exclude and c not in drop_meta]
+        meta_candidates = [
+            c for c in df.columns if c not in metadata_exclude and c not in drop_meta
+        ]
         if meta_candidates:
             df_meta = df.select(
                 [pl.col("domain_id_norm").alias("domain_id")] + [pl.col(c) for c in meta_candidates]
             ).unique(subset=["domain_id"])
-            numeric_cols = [c for c, dt in df_meta.schema.items() if getattr(dt, "is_numeric", lambda: False)()]
+            numeric_cols = [
+                c for c, dt in df_meta.schema.items() if getattr(dt, "is_numeric", lambda: False)()
+            ]
             df_meta = df_meta.with_columns([pl.col(c).round(2).alias(c) for c in numeric_cols])
             df_meta.write_csv(tsv_dir / "domains_metadata.txt", separator="\t", include_header=True)
             df_meta.write_parquet(parquet_dir / "domains_metadata.parquet")
@@ -450,7 +458,15 @@ def write_viz_outputs(
     else:
         # Always emit empty parquet/text files so the front-end receives a valid data URL.
         empty_domains = pl.DataFrame(
-            {"protein_id": [], "domain_id": [], "start": [], "end": [], "database": [], "e_value": [], "cov": []}
+            {
+                "protein_id": [],
+                "domain_id": [],
+                "start": [],
+                "end": [],
+                "database": [],
+                "e_value": [],
+                "cov": [],
+            }
         )
         empty_domains.write_csv(tsv_dir / "domains.txt", separator="\t", include_header=False)
         empty_domains.write_parquet(parquet_dir / "domains.parquet")
@@ -510,7 +526,12 @@ def write_viz_outputs(
             ncrna_meta.select(ncrna_cols).write_parquet(parquet_dir / "ncrna_metadata.parquet")
         else:
             # Backfill missing columns to maintain schema
-            filled = ncrna_meta.select([pl.col(c) if c in ncrna_meta.columns else pl.lit(None).alias(c) for c in ncrna_cols])
+            filled = ncrna_meta.select(
+                [
+                    pl.col(c) if c in ncrna_meta.columns else pl.lit(None).alias(c)
+                    for c in ncrna_cols
+                ]
+            )
             filled.write_csv(tsv_dir / "ncrna_metadata.txt", separator="\t", include_header=True)
             filled.write_parquet(parquet_dir / "ncrna_metadata.parquet")
     else:
@@ -566,9 +587,7 @@ def write_viz_outputs(
             empty_prot.write_parquet(parquet_dir / "protein_links.parquet")
     else:
         empty_prot = pl.DataFrame({c: [] for c in ["qseqid", "sseqid", "pident"]})
-        empty_prot.write_csv(
-            tsv_dir / "protein_links.txt", separator="\t", include_header=False
-        )
+        empty_prot.write_csv(tsv_dir / "protein_links.txt", separator="\t", include_header=False)
         empty_prot.write_parquet(parquet_dir / "protein_links.parquet")
 
     # Render standalone HTML by injecting base64 parquet data into the template placeholders.
@@ -611,11 +630,11 @@ def write_viz_outputs(
     try:
         from IPython import get_ipython
         from IPython.display import IFrame, display
-        
+
         ipython = get_ipython()
-        if ipython is not None and 'IPKernelApp' in ipython.config:
+        if ipython is not None and "IPKernelApp" in ipython.config:
             # We're in a Jupyter notebook
-            display(IFrame(src=str(html_path), width='100%', height=800))
+            display(IFrame(src=str(html_path), width="100%", height=800))
     except (ImportError, AttributeError):
         # Not in a notebook or IPython not available
         pass

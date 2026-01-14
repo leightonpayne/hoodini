@@ -51,16 +51,14 @@ def run_genomad(all_neigh, output, num_threads, valid_unique_ids):
         str(db_path),
     ]
     subprocess.run(genomad_command, check=True)
-    plasmid_file = genomad_dir / "output" / "neighborhoods_summary" / "neighborhoods_plasmid_genes.tsv"
+    plasmid_file = (
+        genomad_dir / "output" / "neighborhoods_summary" / "neighborhoods_plasmid_genes.tsv"
+    )
     virus_file = genomad_dir / "output" / "neighborhoods_summary" / "neighborhoods_virus_genes.tsv"
     plasmid_prots = (
-        pl.read_csv(plasmid_file, separator="\t")
-        if plasmid_file.exists()
-        else pl.DataFrame()
+        pl.read_csv(plasmid_file, separator="\t") if plasmid_file.exists() else pl.DataFrame()
     )
-    virus_prots = (
-        pl.read_csv(virus_file, separator="\t") if virus_file.exists() else pl.DataFrame()
-    )
+    virus_prots = pl.read_csv(virus_file, separator="\t") if virus_file.exists() else pl.DataFrame()
     if plasmid_prots.height == 0 and virus_prots.height == 0:
         return pl.DataFrame()
 

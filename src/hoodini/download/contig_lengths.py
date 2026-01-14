@@ -89,7 +89,7 @@ def get_missing_contigs_from_summary(
     allowed_assemblies_df: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, float | None]:
     """Return a DataFrame of missing assembly_accession values and latest mtime.
-    
+
     Uses lazy evaluation and anti-join with streaming to minimize memory usage.
     """
     # Use lazy scan for summary
@@ -104,7 +104,7 @@ def get_missing_contigs_from_summary(
         .select(pl.col("assembly_accession").cast(pl.Utf8))
         .unique()
     )
-    
+
     # Filter by allowed_assemblies if provided (using semi-join)
     if allowed_assemblies_df is not None:
         summary_lf = summary_lf.join(
@@ -112,17 +112,17 @@ def get_missing_contigs_from_summary(
             on="assembly_accession",
             how="semi",
         )
-    
+
     latest_mtime: float | None = None
-    
+
     # Build missing_lf lazily - scan ALL *.parquet files (compiled + new parts)
     all_parquet_files = list(CONTIG_LENGTHS_DIR.glob("*.parquet"))
-    
+
     if all_parquet_files:
         console.log(f"Scanning {len(all_parquet_files)} parquet files in contig_lengths/...")
         with contextlib.suppress(Exception):
             latest_mtime = max(p.stat().st_mtime for p in all_parquet_files)
-        
+
         # Lazy scan for ALL existing contig assemblies
         contig_lf = (
             pl.scan_parquet(
@@ -133,7 +133,7 @@ def get_missing_contigs_from_summary(
             .select(pl.col("assemblyAccession").cast(pl.Utf8).alias("assembly_accession"))
             .unique()
         )
-        
+
         # Anti-join to find missing (lazy)
         missing_lf = summary_lf.join(
             contig_lf,
@@ -143,14 +143,14 @@ def get_missing_contigs_from_summary(
     else:
         console.log("No existing contig_lengths found, will download all")
         missing_lf = summary_lf
-    
+
     # Collect with streaming to minimize RAM usage
     console.log("Collecting missing assemblies (streaming)...")
     missing_df = missing_lf.collect(streaming=True)
-    
+
     console.log(f"❗ {missing_df.height:,} assemblies missing contig lengths.")
     console.log(f"latest_mtime: {latest_mtime}")
-    
+
     return missing_df, latest_mtime
 
 
@@ -364,7 +364,7 @@ def download_contig_lengths(
             .unique()
         )
         candidate_ids = candidate_ids_lf.collect()["assembly_accession"].to_list()
-        
+
         if candidate_ids:
             links_df = get_prefetched_link_table(candidate_ids, kinds=["sequence_report"])
             # Keep as DataFrame instead of converting to Python set
@@ -384,22 +384,21 @@ def download_contig_lengths(
     if missing_df.height > 0:
         # Get the remote file's Last-Modified date
         remote_last_mod = _get_remote_parquet_last_modified()
-        
+
         if remote_last_mod:
             # Check if seq_rel_date column exists
             schema = pl.scan_parquet(str(ASSEMBLY_SUMMARY)).collect_schema()
             if "seq_rel_date" in schema.names():
                 remote_date = remote_last_mod.date()
-                
+
                 # Join missing with assembly dates, filter by date
-                asm_dates_lf = (
-                    pl.scan_parquet(str(ASSEMBLY_SUMMARY))
-                    .select([
+                asm_dates_lf = pl.scan_parquet(str(ASSEMBLY_SUMMARY)).select(
+                    [
                         pl.col("assembly_accession").cast(pl.Utf8),
                         pl.col("seq_rel_date").str.to_date().alias("seq_rel_date"),
-                    ])
+                    ]
                 )
-                
+
                 # Filter: keep if date is null OR date > remote_date
                 missing_df = (
                     missing_df.lazy()
@@ -414,7 +413,9 @@ def download_contig_lengths(
                     f"Filtered by remote date ({remote_date}): {missing_df.height:,} assemblies remain"
                 )
             else:
-                console.log("⚠️  'seq_rel_date' not found in assembly_summary; skipping date filtering")
+                console.log(
+                    "⚠️  'seq_rel_date' not found in assembly_summary; skipping date filtering"
+                )
 
     if missing_df.height == 0:
         console.log("✅ No missing contig lengths to download.")
@@ -423,13 +424,12 @@ def download_contig_lengths(
     # Convert to list only at the end when needed for API call
     missing_list = missing_df["assembly_accession"].to_list()
     df_links = get_prefetched_link_table(missing_list, kinds=["sequence_report"], seqrep_only=True)
-    
+
     # Use Polars filter instead of boolean mask indexing
     links_filtered = df_links.filter(pl.col("filetype") == "sequence_report")
-    pairs: list[tuple[str, str]] = list(zip(
-        links_filtered["assembly_id"].to_list(),
-        links_filtered["url"].to_list()
-    ))
+    pairs: list[tuple[str, str]] = list(
+        zip(links_filtered["assembly_id"].to_list(), links_filtered["url"].to_list())
+    )
 
     if not pairs:
         console.log("✅ No sequence_report links available for missing assemblies.")

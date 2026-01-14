@@ -17,8 +17,6 @@ except Exception:
     _HAS_SCIPY = False
 
 
-
-
 def _ensure_polars(df_or_lazy) -> pl.DataFrame:
     """Convert eager/lazy Polars to eager Polars. Reject other types to avoid pandas dependency."""
     if isinstance(df_or_lazy, pl.DataFrame):
@@ -260,7 +258,7 @@ def _rbh_from_ann(ann: pl.DataFrame) -> pl.DataFrame:
     best_q_to_target = (
         ann.with_columns(
             pl.col("pident")
-            .rank(method="ordinal", descending=True)  
+            .rank(method="ordinal", descending=True)
             .over(["qseqid", "t_seq"])
             .alias("_rk")
         )
@@ -305,13 +303,11 @@ def _rbh_from_ann(ann: pl.DataFrame) -> pl.DataFrame:
             pl.col("target_seq"),
             pl.col("qseqid"),
             pl.col("sseqid"),
-            pl.col("pident_best_qt").alias("pident"),  
+            pl.col("pident_best_qt").alias("pident"),
         ]
     )
 
     return rbh
-
-
 
 
 def compute_wgrr(
@@ -555,8 +551,6 @@ def compute_vcontact2_hypergeom(
     return pairs.rename({"query_seq": "qseqid", "target_seq": "sseqid"})
 
 
-
-
 def run_proteome_similarity(
     all_prots: pl.DataFrame | pl.DataFrame | pl.LazyFrame,
     pairwise_aa: pl.DataFrame | pl.DataFrame | pl.LazyFrame,
@@ -731,7 +725,9 @@ def run_proteome_similarity(
         if aai_df is not None:
             aai_df.write_csv(outdir_path / "aai.tsv", separator="\t", include_header=False)
         if vcon_df is not None:
-            vcon_df.write_csv(outdir_path / "vcontact_hypergeom.tsv", separator="\t", include_header=False)
+            vcon_df.write_csv(
+                outdir_path / "vcontact_hypergeom.tsv", separator="\t", include_header=False
+            )
 
     if mode == "wgrr":
         return wgrr_df
