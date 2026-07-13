@@ -1,5 +1,4 @@
 import subprocess
-from io import StringIO
 from pathlib import Path
 
 import polars as pl
@@ -72,7 +71,17 @@ def cluster_proteins(
     write_fasta(fasta_df, "id", "sequence", faa_path)
 
     if clust_method == "diamond_deepclust":
-        cmd = ["diamond", "deepclust", "-d", faa_path, "--member-cover", "0.8"]
+        cluster_out = output_dir / "diamond_deepclust_results.tsv"
+        cmd = [
+            "diamond",
+            "deepclust",
+            "-d",
+            str(faa_path),
+            "--out",
+            str(cluster_out),
+            "--member-cover",
+            "0.8",
+        ]
         result = subprocess.run(cmd, capture_output=True)
         if result.returncode != 0:
             stderr_msg = result.stderr.decode("utf-8", errors="replace").strip()
@@ -83,8 +92,14 @@ def cluster_proteins(
                 f"  Stderr: {stderr_msg or '(empty)'}\n"
                 f"  Stdout: {stdout_msg[:500] if stdout_msg else '(empty)'}"
             )
+        if not cluster_out.exists():
+            raise RuntimeError(
+                f"diamond deepclust completed without producing an output file:\n"
+                f"  Command: {' '.join(str(c) for c in cmd)}\n"
+                f"  Expected output: {cluster_out}"
+            )
         clusterdf = pl.read_csv(
-            StringIO(result.stdout.decode("utf-8")),
+            cluster_out,
             separator="\t",
             has_header=False,
             new_columns=["clu_rep_seq", "member"],
